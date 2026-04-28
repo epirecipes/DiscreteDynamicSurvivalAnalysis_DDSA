@@ -1,0 +1,1162 @@
+---
+title: "Hagelloch 1861 measles: GLCT vs Boxcar DDSA comparison (M_θ analogue)"
+author: "Sandra Montes (`@slmontes`)"
+date: 2026-03-25
+format:
+    pdf:
+        code-overflow: wrap
+        engine: xelatex
+        fig-format: pdf
+        mainfont: "Libertinus Serif"
+        sansfont: "Libertinus Sans"
+        monofont: "Libertinus Mono"
+        mathfont: "Libertinus Math"
+        citeproc: false
+    html:
+        code-overflow: wrap
+    gfm: default
+execute:
+    cache: true
+engine: julia
+julia:
+    exeflags: ["--project=@.", "-t10"]
+env:
+    - JULIA_NUM_THREADS=10
+---
+
+# Introduction
+
+We apply discrete dynamic survival analysis (DDSA) to the 1861 measles outbreak in Hagelloch, Germany (188 cases over 86 days). The line list of this outbreak was used on an individual-level analysis by Neal \& Roberts (2004, hereafter NR), which we use as a reference point. 
+
+This study treats the Hagelloch measles outbreak as a stress test of our stratified mean-field DDSA model. The Hagelloch data are a challenging case because transmission is strongly shaped by individual-level contact structure (household and classroom links), which is explicitly represented in the Neal and Roberts framework. By contrast, our specification intentionally aggregates transmission into three interacting groups and therefore does not attempt to reproduce the full contact network. 
+
+Our goal is not to reproduce NR's individual-level household/contact likelihood, but to assess what a mean-field DDSA analogue can recover from the case line list with a simplified model: the qualitative hierarchy of transmission parameters (specifically $\beta_{C1} > \beta_{C2}$ and $\beta_H > 0$, together with correct epidemic sequencing of the three groups) and the susceptible group sizes, which NR treat as fixed but DDSA infers via final-size constraints. Because the contact structure is aggregated into mean-field terms, we expect per-group attack rates to be underestimated relative to the data.
+
+The dataset is available in R's `outbreaks` package as `measles_hagelloch_1861`. Individual prodrome-onset dates and rash-onset dates are recorded for all cases, allowing us to:
+
+1. Construct the infection-time histogram (`th`) from prodrome-onset dates.
+2. Compute observed infectious-period durations (`delta`) as $\delta_i = (t_{\mathrm{ERU},i} - t_{\mathrm{PRO},i}) + 4$ days, following Neal & Roberts (2004) with $d_0 = 3$ (child remains infectious 3 days after rash onset) and $d_1 = 1$ (child becomes infectious 1 day before prodrome onset), so the +4 = $d_0 + d_1$.
+
+The infectious period has empirical mean $\approx$ 8 days. We model it with a NegBin discrete phase-type (DPH) distribution (rather than a simple geometric period).
+
+Neal \& Roberts (2004) partitions the 188 cases into three groups based on school enrolment:
+
+- _Class 0 (not yet enrolled)_: No initial cases; infected via household transmission, peaked later (infection times 8–28 days).
+- _Class 1 (younger school class)_: No initial cases; concentrated wave peaking around days 21–28.
+- _Class 2 (older school class)_: Contains index case; infection times span the full epidemic window (days 0–40), with the main wave peaking around day 28–30.
+
+We use the four transmission parameters from NR's model $M_\theta$: within-class 1 ($\beta_{C1}$), within-class 2 ($\beta_{C2}$), a household-route term from school to pre-school ($\beta_H$), and a global uniform-mixing term ($\beta_G$). The infectious period is shared across classes and modelled with a NegBin DPH. Inference uses a Gibbs scheme: $\beta_{C1}$, $\beta_{C2}$, $\beta_H$, $\beta_G$, and the calendar mean $\mathbb{E}[\delta]$ are updated jointly by one NUTS step; while the phase count $r$ and population sizes $N_0$, $N_1$, $N_2$ are updated by Metropolis--Hastings. We set $p = r/(\mathbb{E}[\delta]-\delta_{\min}+r)$ given $\mathbb{E}[\delta]$ and $r$. Calendar infectious period $\delta$ includes NR's fixed $+4$ days, so we prepend $(\delta_{\min}-r)$ deterministic day-states to that DPH (with $\delta_{\min}=\min_i \delta_i = 4$ here), giving support $\{\delta_{\min},\delta_{\min}+1,\ldots\}$ and $\mathbb{E}[\delta]=(\delta_{\min}-r)+r/p$.
+
+NR parameterise the per-day rate at which infectious individual $i$ infects susceptible $j$ as
+
+$$\alpha_{ij} = \beta_H \mathbf{1}_{\{\text{same household}\}} + \beta_C^1 \mathbf{1}_{\{L_i = L_j = 1\}} + \beta_C^2 \mathbf{1}_{\{L_i = L_j = 2\}} + \beta_G,$$
+
+where the global term $\beta_G$ replaces the distance-decay $\beta_G \exp(-\theta\rho(i,j))$ of the full model M by setting $\theta = 0$. Our mean-field analogue translates this individual-level rate into group-level forces of infection:
+
+$$\lambda_0 = \bigl(1 - e^{-[\beta_H (I_1 + I_2) + \beta_G (I_0 + I_1 + I_2)]}\bigr)S_0$$
+
+$$\lambda_1 = \bigl(1 - e^{-[\beta_{C1}\, I_1 + \beta_G (I_0 + I_1 + I_2)]}\bigr)S_1$$
+
+$$\lambda_2 = \bigl(1 - e^{-[\beta_{C2}\, I_2 + \beta_G (I_0 + I_1 + I_2)]}\bigr)S_2$$
+
+Here $S_k$ and $I_k$ are the susceptible and infectious fractions of group $k$ (each ranging over $[0,1]$), and $N_0$, $N_1$, $N_2$ are inferred via Binomial final-size likelihoods.
+
+We treat Class 0 as downstream of the school epidemic via the household-route term $\beta_H$ and allow mixing between the school classes through $\beta_G$. No spatial coordinates enter the model ($\theta=0$ in the NR notation).
+
+We fit the model using two function-map implementations (GLCT and Boxcar) that share the same likelihood terms and recovery model. The agreement between them is used as an implementation check.
+
+## Libraries
+
+```{julia}
+#| echo: true
+#| output: false
+
+using Random, LinearAlgebra
+import Statistics: mean, std, median, quantile
+using Distributions
+using Turing
+# Compatibility patch for Turing Gibbs/MH warmup copy behavior (needed for some versions of Turing).
+let Ti = Turing.Inference
+    if isdefined(Ti, :StoreLinkedValues)
+        Ty = getfield(Ti, :StoreLinkedValues)
+        @eval Base.copy(::$Ty) = $Ty()
+    end
+    if isdefined(Ti, :StoreUnspecifiedPriors)
+        Ty = getfield(Ti, :StoreUnspecifiedPriors)
+        @eval Base.copy(x::$Ty) = $Ty(copy(x.vns_with_proposal))
+    end
+end
+using StatsPlots, Plots
+using ForwardDiff
+using CSV, DataFrames
+using MCMCDiagnosticTools
+
+include("./PhaseTypeDistributions.jl")
+import .PhaseTypeDistributions
+```
+
+```{julia}
+#| echo: true
+#| output: false
+Random.seed!(1234)
+```
+
+# Data
+
+```{julia}
+#| echo: true
+#| output: false
+
+df = CSV.read("../hagelloch.csv", DataFrame)
+
+# CSV.jl return type IDs / class labels as Int
+function _line_list_id(v)
+    ismissing(v) && return nothing
+    if v isa Union{Integer, AbstractFloat}
+        x = Float64(v)
+        isfinite(x) || return nothing
+        return Int(round(x))
+    end
+    s = strip(string(v))
+    (isempty(s) || uppercase(s) in ("NA", "N/A", ".")) && return nothing
+    return tryparse(Int, s)
+end
+
+df0 = filter(r -> coalesce(_line_list_id(r.class), -1) == 0, df)
+df1 = filter(r -> coalesce(_line_list_id(r.class), -1) == 1, df)
+df2 = filter(r -> coalesce(_line_list_id(r.class), -1) == 2, df)
+
+K0 = nrow(df0)
+K1 = nrow(df1)
+K2 = nrow(df2)
+
+# Census-based bounds from Neal & Roberts (2004): infer N0,N1,N2 from K0,K1,K2 with N_total=197.
+N_total = 197
+N0_max  = N_total - K1 - K2   # = 197 - 30 - 68 = 99
+N1_max  = N_total - K0 - K2   # = 197 - 90 - 68 = 39
+N2_max  = N_total - K0 - K1   # = 197 - 90 - 30 = 77
+
+# Shared epidemic window across all three classes
+Tmax = maximum(vcat(df0.t_infection, df1.t_infection, df2.t_infection))
+
+# Shared recovery intervals (all three groups)
+delta = vcat(df0.inf_period, df1.inf_period, df2.inf_period)
+
+# Buffer beyond Tmax: a couple of mean infectious periods
+nsteps = Tmax + 2 * round(Int, mean(delta))
+
+# Infection-time histograms (1-indexed)
+th0 = zeros(Int, nsteps)
+th1 = zeros(Int, nsteps)
+th2 = zeros(Int, nsteps)
+for row in eachrow(df0); idx = row.t_infection + 1; idx <= nsteps && (th0[idx] += 1); end
+for row in eachrow(df1); idx = row.t_infection + 1; idx <= nsteps && (th1[idx] += 1); end
+for row in eachrow(df2); idx = row.t_infection + 1; idx <= nsteps && (th2[idx] += 1); end
+
+# Support condition for offset NegBin DPH: r ≤ δ_min.
+nb_r_max = minimum(delta)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("K0=$K0 (class 0),  K1=$K1 (class 1),  K2=$K2 (class 2)")
+println("nsteps = $nsteps  (covers epidemic window to day $Tmax + buffer)")
+empirical_cv = std(delta) / mean(delta)
+println("Recovery intervals: mean=$(round(mean(delta),digits=2)) d,  " *
+        "min=$(minimum(delta)),  max=$(maximum(delta)),  " *
+        "CV=$(round(empirical_cv, digits=3))")
+println("nb_r_max = $nb_r_max  " *
+        "(geometric CV would be 1.0; empirical CV=$(round(empirical_cv,digits=2)) " *
+        "→ NegBin DPH warranted)")
+
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+# Data-derived: source of infection for class 0 (pre-school) cases
+class_lookup = Dict{Int, Int}()
+for row in eachrow(df)
+    kid = _line_list_id(row.case_ID)
+    kid === nothing && continue
+    cid = _line_list_id(row.class)
+    cid === nothing && continue
+    class_lookup[kid] = cid
+end
+c0_from_school = count(eachrow(df0)) do row
+    inf = row.infector
+    iid = _line_list_id(inf)
+    iid === nothing && return false
+    cls = get(class_lookup, iid, nothing)
+    cls !== nothing && cls in (1, 2)
+end
+c0_from_c0 = count(eachrow(df0)) do row
+    inf = row.infector
+    iid = _line_list_id(inf)
+    iid === nothing && return false
+    cls = get(class_lookup, iid, nothing)
+    cls !== nothing && cls == 0
+end
+c0_unresolved = K0 - c0_from_school - c0_from_c0
+
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("Class 0 infection source (from `infector` column):")
+println("  from school siblings (class 1 or 2): $c0_from_school / $K0  " *
+        "($(round(100*c0_from_school/K0, digits=1))%)")
+println("  from class 0 (community play):        $c0_from_c0 / $K0  " *
+        "($(round(100*c0_from_c0/K0, digits=1))%)")
+println("  unresolved (missing or unknown infector): $c0_unresolved / $K0  " *
+        "($(round(100*c0_unresolved/K0, digits=1))%)")
+```
+
+Plot of the infection-time histograms extracted from the data:
+```{julia}
+#| echo: false
+#| output: true
+
+p0 = bar(1:nsteps, th0, xlabel="Day", ylabel="New infections",
+         title="Class 0 (pre-school)", label="", color=:forestgreen, alpha=0.7,
+         ylims=(0, max(1.0, maximum(vcat(th0, th1, th2)))))
+p1 = bar(1:nsteps, th1, xlabel="Day", ylabel="New infections",
+         title="Class 1 (younger)", label="", color=:steelblue, alpha=0.7,
+         ylims=(0, max(1.0, maximum(vcat(th0, th1, th2)))))
+p2 = bar(1:nsteps, th2, xlabel="Day", ylabel="New infections",
+         title="Class 2 (older)", label="", color=:tomato, alpha=0.7,
+         ylims=(0, max(1.0, maximum(vcat(th0, th1, th2)))))
+plot(p0, p1, p2, layout=(1,3), size=(1050, 300),
+     left_margin=4Plots.mm, bottom_margin=4Plots.mm)
+```
+
+# Models
+
+Both the GLCT and Boxcar maps implement the same three-group $M_\theta$ force-of-infection structure and the same NegBin DPH infectious-period distribution. They differ only in how the infectious-period distribution is propagated in time: the GLCT updates a phase-vector by matrix multiplication, while the Boxcar tracks infection-age cohorts using a discrete hazard vector derived from that same DPH.
+
+## GLCT 
+
+The SIR map tracks susceptible fractions $S_k$ and phase-vector $\mathbf{x}_k$ for each group $k \in \{0, 1, 2\}$. Transmission follows the forces of infection $\lambda_k$ previously defined, and there is no feedback from class 0 to school classes.
+
+```{julia}
+#| echo: true
+#| output: false
+
+"""GLCT model (M_θ analogue).
+Propagates three phase-vectors using the exponential rate-to-probability force of infection"""
+function run_sir_mtheta(T_mat, alpha, beta_C1, beta_C2, beta_H, beta_G,
+                         rho0, rho1, rho2, nsteps)
+    T_el = promote_type(eltype(T_mat), eltype(alpha),
+                        typeof(beta_C1), typeof(beta_C2),
+                        typeof(beta_H),  typeof(beta_G),
+                        typeof(rho0), typeof(rho1), typeof(rho2))
+
+    S0 = one(T_el) - T_el(rho0);  x0 = T_el.(alpha) .* T_el(rho0)
+    S1 = one(T_el) - T_el(rho1);  x1 = T_el.(alpha) .* T_el(rho1)
+    S2 = one(T_el) - T_el(rho2);  x2 = T_el.(alpha) .* T_el(rho2)
+
+    S0_hist = T_el[S0]
+    S1_hist = T_el[S1]
+    S2_hist = T_el[S2]
+
+    for _ in 1:nsteps
+        I0 = sum(x0);  I1 = sum(x1);  I2 = sum(x2)
+        I_total = I0 + I1 + I2
+
+        # Forces of infection (M_θ) 
+        # p = 1 − exp(−rate·Δt) with Δt=1; clamp to [0, Sk] for numerical safety
+        r0 = T_el(beta_H) * (I1 + I2) + T_el(beta_G) * I_total
+        r1 = T_el(beta_C1) * I1        + T_el(beta_G) * I_total
+        r2 = T_el(beta_C2) * I2        + T_el(beta_G) * I_total
+        λ0 = min(max((one(T_el) - exp(-r0)) * S0, zero(T_el)), S0)
+        λ1 = min(max((one(T_el) - exp(-r1)) * S1, zero(T_el)), S1)
+        λ2 = min(max((one(T_el) - exp(-r2)) * S2, zero(T_el)), S2)
+
+        x0 = T_mat' * x0 .+ T_el.(alpha) .* λ0
+        x1 = T_mat' * x1 .+ T_el.(alpha) .* λ1
+        x2 = T_mat' * x2 .+ T_el.(alpha) .* λ2
+        S0 -= λ0;  S1 -= λ1;  S2 -= λ2
+
+        push!(S0_hist, S0)
+        push!(S1_hist, S1)
+        push!(S2_hist, S2)
+    end
+
+    function to_pmf(S_hist)
+        f = T_el[max(S_hist[t] - S_hist[t+1], zero(T_el)) for t in 1:nsteps]
+        sF = sum(f)
+        sF > T_el(1e-12) ? f ./ sF : fill(one(T_el)/nsteps, nsteps)
+    end
+
+    tau0 = S0_hist[1] - S0_hist[end]
+    tau1 = S1_hist[1] - S1_hist[end]
+    tau2 = S2_hist[1] - S2_hist[end]
+
+    return (tau0=tau0, f0=to_pmf(S0_hist),
+            tau1=tau1, f1=to_pmf(S1_hist),
+            tau2=tau2, f2=to_pmf(S2_hist))
+end
+```
+
+## Boxcar
+
+The Boxcar model uses infection-age cohort bookkeeping: newly infected individuals enter age class 1 and advance one step per day, exiting at the discrete hazard $h(k) = P(W=k \mid W \geq k)$ derived from the same offset NegBin DPH. Both representations share the same marginal recovery-time distribution and the same $1 - e^{-\text{rate}}$ discretisation of the force of infection. 
+
+The hazard vector $\mathbf{h}$ is computed by iterating the transient-state vector $\mathbf{x}_{k+1} = S^\top\mathbf{x}_k$ (starting from $\mathbf{x}_1 = \alpha$) and setting $h(k) = (\mathbf{x}_k \cdot \mathbf{s})/\sum\mathbf{x}_k$, where $\mathbf{s}$ is the absorption probability vector. The implementation is ForwardDiff-compatible (Dual-valued parameters), other AD methods may also work but have not been tested here.
+
+```{julia}
+#| echo: false
+#| output: false
+
+# Needed for K_age truncation below.
+δ_floor_ip = minimum(delta)
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+"""Compute discrete hazard h[k] = P(W=k|W≥k) from a DPH by iterating the state vector.
+If dph has ForwardDiff Dual parameters, returns a Dual-typed vector."""
+function hazard_vector_from_dph(dph, K_age::Integer)
+    T   = eltype(dph.α)
+    s   = dph.s
+    h   = Vector{T}(undef, K_age)
+    x   = copy(dph.α)          # state probability vector at infection-age 1
+    for k in 1:K_age
+        sf_val  = sum(x)
+        pmf_val = dot(x, s)
+        h[k]    = (sf_val > T(1e-15) && isfinite(sf_val)) ? pmf_val / sf_val : T(0.01)
+        x       = dph.S' * x   # advance to next infection age
+    end
+    h[end] = one(T)            # boundary: everyone at the last class recovers
+    return clamp.(h, zero(T), one(T))
+end
+
+"""Three-group SIR Boxcar map (M_θ analogue).
+Propagates three infection-age vectors using discrete hazard h_rec and the same exponential rate-to-probability force."""
+function run_sir_mtheta_boxcar(h_rec, K_age::Int,
+                                beta_C1, beta_C2, beta_H, beta_G,
+                                rho0, rho1, rho2, nsteps::Int)
+    T_el = promote_type(eltype(h_rec), typeof(beta_C1), typeof(beta_C2),
+                        typeof(beta_H),  typeof(beta_G),
+                        typeof(rho0), typeof(rho1), typeof(rho2))
+
+    S0 = one(T_el) - T_el(rho0)
+    S1 = one(T_el) - T_el(rho1)
+    S2 = one(T_el) - T_el(rho2)
+
+    # All initial infecteds placed in age class 1 (consistent with offset DPH α[1]=1)
+    x0 = zeros(T_el, K_age);  x0[1] = T_el(rho0)
+    x1 = zeros(T_el, K_age);  x1[1] = T_el(rho1)
+    x2 = zeros(T_el, K_age);  x2[1] = T_el(rho2)
+
+    S0_hist = T_el[S0];  S1_hist = T_el[S1];  S2_hist = T_el[S2]
+
+    for _ in 1:nsteps
+        I0 = sum(x0);  I1 = sum(x1);  I2 = sum(x2)
+        I_total = I0 + I1 + I2
+
+        # Exponential rate-to-probability discretisation — identical to run_sir_mtheta
+        r0 = T_el(beta_H) * (I1 + I2) + T_el(beta_G) * I_total
+        r1 = T_el(beta_C1) * I1        + T_el(beta_G) * I_total
+        r2 = T_el(beta_C2) * I2        + T_el(beta_G) * I_total
+        λ0 = min(max((one(T_el) - exp(-r0)) * S0, zero(T_el)), S0)
+        λ1 = min(max((one(T_el) - exp(-r1)) * S1, zero(T_el)), S1)
+        λ2 = min(max((one(T_el) - exp(-r2)) * S2, zero(T_el)), S2)
+
+        x0_new = zeros(T_el, K_age)
+        x1_new = zeros(T_el, K_age)
+        x2_new = zeros(T_el, K_age)
+
+        # New infections enter age class 1
+        x0_new[1] += λ0;  x1_new[1] += λ1;  x2_new[1] += λ2
+
+        # Advance age classes; h[k] fraction absorbs (recovers), 1−h[k] advances
+        @inbounds for k in 1:(K_age - 1)
+            h_k = T_el(h_rec[k])
+            x0_new[k+1] += x0[k] * (one(T_el) - h_k)
+            x1_new[k+1] += x1[k] * (one(T_el) - h_k)
+            x2_new[k+1] += x2[k] * (one(T_el) - h_k)
+        end
+        # k == K_age: h[K_age]=1, all remaining mass is absorbed
+
+        x0 = x0_new;  x1 = x1_new;  x2 = x2_new
+        S0 = max(zero(T_el), S0 - λ0)
+        S1 = max(zero(T_el), S1 - λ1)
+        S2 = max(zero(T_el), S2 - λ2)
+
+        push!(S0_hist, S0);  push!(S1_hist, S1);  push!(S2_hist, S2)
+    end
+
+    function to_pmf(S_hist)
+        f = T_el[max(S_hist[t] - S_hist[t+1], zero(T_el)) for t in 1:nsteps]
+        sF = sum(f)
+        sF > T_el(1e-12) ? f ./ sF : fill(one(T_el)/nsteps, nsteps)
+    end
+
+    tau0 = S0_hist[1] - S0_hist[end]
+    tau1 = S1_hist[1] - S1_hist[end]
+    tau2 = S2_hist[1] - S2_hist[end]
+
+    return (tau0=tau0, f0=to_pmf(S0_hist),
+            tau1=tau1, f1=to_pmf(S1_hist),
+            tau2=tau2, f2=to_pmf(S2_hist))
+end
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+# K_age truncation: 99.99th percentile of the offset NegBin DPH 
+let dph_nom_bc = PhaseTypeDistributions.dph_negative_binomial_min_support(
+        nb_r_max,
+        nb_r_max / (mean(delta) - δ_floor_ip + nb_r_max),
+        δ_floor_ip)
+    global K_age_boxcar = max(40,
+        findfirst(kk -> PhaseTypeDistributions.cdf(dph_nom_bc, kk) >= 0.9999, 1:200))
+end
+println("K_age_boxcar = $K_age_boxcar  (99.99th-percentile truncation for Boxcar age dimension)")
+```
+
+# Inference
+
+Inference uses a Gibbs scheme: $\beta_{C1}$, $\beta_{C2}$, $\beta_H$, $\beta_G$, $\mathbb{E}[\delta]$ are updated jointly by one NUTS step, while the four discrete parameters (nb\_r, $N_0$, $N_1$, $N_2$) are sampled by Metropolis--Hastings (NegBin--DPH with Neal--Roberts offset). The epidemic is seeded by a single index case in Class 2 ($\rho_2 = 1/N_2$) with no initial infections in Classes 0 or 1 ($\rho_0 = \rho_1 = 0$), consistent with the Hagelloch data where the first recorded case belongs to Class 2.
+
+The group population sizes are not recoverable from `hagelloch.csv`, which records only the 188 infected individuals. All three susceptible population sizes are therefore inferred from the data via the Binomial final-size constraints $K_k \sim \mathrm{Binomial}(N_k, \tau_k)$ for $k \in \{0, 1, 2\}$. By contrast, in the Hagelloch analysis of Neal & Roberts (2004), population size is treated as given (they assume $m=n=188$) within an individual event-history likelihood. Thus, their framework does not identify group denominators from aggregate case counts alone.
+
+Each $N_k$ is given a $\mathrm{DiscreteUniform}(K_k, N_{k,\max})$ prior. The lower bound $K_k$ is the minimum possible group size (cannot have fewer susceptibles than observed cases). For the upper bound we use an external population count: Pfeilsticker's original epidemic documentation (as cited in Neal \& Roberts, 2004) records 197 children under 14 in Hagelloch at the time of the outbreak. Of these, 185 were infected and are present in the line list (plus 3 teenagers aged 14--15, giving $K = 188$ total); the 12 non-infected children each had a documented reason for non-infection (7 infants with placental immunity, 3 kept in total isolation, 1 two-year-old, 1 immigrant who had previously had measles). Neal \& Roberts therefore conclude that virtually all truly susceptible children were infected, and treat the total susceptible population as $N_{\mathrm{total}} = 197$.
+
+Assuming all 197 children belong to one of the three groups, the maximum possible size of group $k$ is:
+
+$$N_{k,\max} = N_{\mathrm{total}} - K_{k'} - K_{k''}.$$
+
+This gives $N_0 \in [90, 99]$, $N_1 \in [30, 39]$, $N_2 \in [68, 77]$, tight ranges reflecting the near-complete attack rate (188/197 = 95%).
+
+## GLCT Turing model
+
+```{julia}
+#| echo: true
+#| output: false
+
+function safe_normalise(f::AbstractVector{T}, n::Int) where T
+    f_pos = ifelse.(isnan.(f) .| .!isfinite.(f), zero(T), max.(f, zero(T)))
+    sF = sum(f_pos)
+    (sF > T(1e-15) && isfinite(sF)) ? f_pos ./ sF : fill(one(T)/n, n)
+end
+
+# Infectious period: offset NegBin DPH with minimum δ_floor.
+
+@model function ddsa_hagelloch_mtheta(K0::Int, K1::Int, K2::Int,
+                                       N0_max::Int, N1_max::Int, N2_max::Int,
+                                       th0::Vector{Int}, th1::Vector{Int},
+                                       th2::Vector{Int},
+                                       delta::Vector{Int},
+                                       nsteps::Int,
+                                       δ_floor::Int)
+    # Priors — population sizes inferred within census-derived bounds
+    N0 ~ DiscreteUniform(K0, N0_max)
+    N1 ~ DiscreteUniform(K1, N1_max)
+    N2 ~ DiscreteUniform(K2, N2_max)
+
+    # Index case in class 2; rho2 seeds one case out of N2 susceptibles
+    rho0 = 0.0
+    rho1 = 0.0
+    rho2 = 1.0 / N2
+
+    # Exponential priors to avoid near-zero-rate initialisation.
+    beta_C1 ~ Exponential(0.2)
+    beta_C2 ~ Exponential(0.1)
+    beta_H  ~ Exponential(0.1)
+    beta_G  ~ Exponential(0.1)
+    # Reparameterise (r, p) by mean δ for better Gibbs/NUTS geometry.
+    mean_δ ~ Uniform(δ_floor + 0.5, 25.0)
+    nb_r ~ DiscreteUniform(1, nb_r_max)
+    nb_p = nb_r / (mean_δ - δ_floor + nb_r)
+
+    dph = PhaseTypeDistributions.dph_negative_binomial_min_support(nb_r, nb_p, δ_floor)
+
+    sim = run_sir_mtheta(dph.S, dph.α, beta_C1, beta_C2, beta_H, beta_G,
+                          rho0, rho1, rho2, nsteps)
+
+    tau0 = clamp(sim.tau0, 0.001, 0.999)
+    tau1 = clamp(sim.tau1, 0.001, 0.999)
+    tau2 = clamp(sim.tau2, 0.001, 0.999)
+
+    f0 = safe_normalise(sim.f0, nsteps)
+    f1 = safe_normalise(sim.f1, nsteps)
+    f2 = safe_normalise(sim.f2, nsteps)
+
+    # Binomial final-size constraints for all three groups
+    K0 ~ Binomial(N0, tau0)
+    K1 ~ Binomial(N1, tau1)
+    K2 ~ Binomial(N2, tau2)
+
+    # Infection-time histograms
+    if K0 > 0 && all(isfinite, f0) && abs(sum(f0) - 1) < 0.01
+        th0 ~ Multinomial(K0, f0)
+    else
+        Turing.@addlogprob! -Inf
+    end
+    if K1 > 0 && all(isfinite, f1) && abs(sum(f1) - 1) < 0.01
+        th1 ~ Multinomial(K1, f1)
+    else
+        Turing.@addlogprob! -Inf
+    end
+    if K2 > 0 && all(isfinite, f2) && abs(sum(f2) - 1) < 0.01
+        th2 ~ Multinomial(K2, f2)
+    else
+        Turing.@addlogprob! -Inf
+    end
+
+    # Shared NegBin DPH recovery likelihood
+    n_δ = length(delta)
+    for i in 1:n_δ
+        delta[i] ~ dph
+    end
+end
+```
+
+## Boxcar Turing model
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function ddsa_hagelloch_mtheta_boxcar(K0::Int, K1::Int, K2::Int,
+                                              N0_max::Int, N1_max::Int, N2_max::Int,
+                                              th0::Vector{Int}, th1::Vector{Int},
+                                              th2::Vector{Int},
+                                              delta::Vector{Int},
+                                              nsteps::Int,
+                                              δ_floor::Int,
+                                              K_age::Int)
+    N0 ~ DiscreteUniform(K0, N0_max)
+    N1 ~ DiscreteUniform(K1, N1_max)
+    N2 ~ DiscreteUniform(K2, N2_max)
+
+    rho0 = 0.0;  rho1 = 0.0;  rho2 = 1.0 / N2
+
+    beta_C1 ~ Exponential(0.2)
+    beta_C2 ~ Exponential(0.1)
+    beta_H  ~ Exponential(0.1)
+    beta_G  ~ Exponential(0.1)
+    mean_δ  ~ Uniform(δ_floor + 0.5, 25.0)
+    nb_r    ~ DiscreteUniform(1, nb_r_max)
+    nb_p    = nb_r / (mean_δ - δ_floor + nb_r)
+
+    dph   = PhaseTypeDistributions.dph_negative_binomial_min_support(nb_r, nb_p, δ_floor)
+    h_rec = hazard_vector_from_dph(dph, K_age)
+
+    sim  = run_sir_mtheta_boxcar(h_rec, K_age, beta_C1, beta_C2, beta_H, beta_G,
+                                  rho0, rho1, rho2, nsteps)
+
+    tau0 = clamp(sim.tau0, 0.001, 0.999)
+    tau1 = clamp(sim.tau1, 0.001, 0.999)
+    tau2 = clamp(sim.tau2, 0.001, 0.999)
+
+    f0 = safe_normalise(sim.f0, nsteps)
+    f1 = safe_normalise(sim.f1, nsteps)
+    f2 = safe_normalise(sim.f2, nsteps)
+
+    K0 ~ Binomial(N0, tau0)
+    K1 ~ Binomial(N1, tau1)
+    K2 ~ Binomial(N2, tau2)
+
+    if K0 > 0 && all(isfinite, f0) && abs(sum(f0) - 1) < 0.01
+        th0 ~ Multinomial(K0, f0)
+    else
+        Turing.@addlogprob! -Inf
+    end
+    if K1 > 0 && all(isfinite, f1) && abs(sum(f1) - 1) < 0.01
+        th1 ~ Multinomial(K1, f1)
+    else
+        Turing.@addlogprob! -Inf
+    end
+    if K2 > 0 && all(isfinite, f2) && abs(sum(f2) - 1) < 0.01
+        th2 ~ Multinomial(K2, f2)
+    else
+        Turing.@addlogprob! -Inf
+    end
+
+    # Recovery likelihood: same offset DPH PMF 
+    n_δ = length(delta)
+    for i in 1:n_δ
+        delta[i] ~ dph
+    end
+end
+```
+
+## Sampler
+
+Both models use an identical sampler configuration: independence Metropolis--Hastings for `nb_r`, one joint Metropolis--Hastings block for ($N_0$, $N_1$, $N_2$), and one joint NUTS step for the five continuous parameters ($\beta_{C1}$, $\beta_{C2}$, $\beta_H$, $\beta_G$, `mean_δ`) each full Gibbs sweep. Four parallel chains are run with cold starts (initial `nb_r` spread over $\{1,\ldots,4\}$; moderate $\beta$'s and `mean_δ`).
+
+**GLCT**
+
+```{julia}
+#| echo: true
+#| output: false
+
+n_samples  = 20_000
+nuts_adapt = 2_000
+n_chains   = 4
+
+gibbs_sampler   = Gibbs(
+    :nb_r    => MH(:nb_r => DiscreteUniform(1, nb_r_max)),
+    (:N0, :N1, :N2) =>
+        MH(:N0 => DiscreteUniform(K0, N0_max),
+           :N1 => DiscreteUniform(K1, N1_max),
+           :N2 => DiscreteUniform(K2, N2_max)),
+    (:beta_C1, :beta_C2, :beta_H, :beta_G, :mean_δ) => NUTS(nuts_adapt, 0.8; max_depth=12, Δ_max=1000.0)
+)
+
+delta_bar = mean(delta)
+# Spread initial β_C2 across chains so cold starts are less likely to lock all chains in the same ridge.
+init_params_vec = [
+    (nb_r = i,
+     mean_δ = delta_bar,
+     N0 = K0 + 5, N1 = K1 + 5, N2 = K2 + 5,
+     beta_C1 = 0.2, beta_C2 = 0.05 + 0.05 * (i - 1), beta_H = 0.1, beta_G = 0.1)
+    for i in 1:n_chains
+]
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+δ_floor_ip = minimum(delta)
+model_mtheta = ddsa_hagelloch_mtheta(K0, K1, K2, N0_max, N1_max, N2_max,
+                                      th0, th1, th2, delta, nsteps, δ_floor_ip)
+
+# Warm-up sample to trigger JIT
+_ = sample(model_mtheta, gibbs_sampler, 1;
+           progress=false, initial_params=init_params_vec[1])
+
+chain = sample(model_mtheta, gibbs_sampler, MCMCThreads(), n_samples, n_chains;
+               progress=false, initial_params=init_params_vec)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+describe(chain)
+```
+
+**Boxcar**
+
+```{julia}
+#| echo: true
+#| output: false
+
+gibbs_boxcar = Gibbs(
+    :nb_r    => MH(:nb_r => DiscreteUniform(1, nb_r_max)),
+    (:N0, :N1, :N2) =>
+        MH(:N0 => DiscreteUniform(K0, N0_max),
+           :N1 => DiscreteUniform(K1, N1_max),
+           :N2 => DiscreteUniform(K2, N2_max)),
+    (:beta_C1, :beta_C2, :beta_H, :beta_G, :mean_δ) =>
+        NUTS(nuts_adapt, 0.8; max_depth=12, Δ_max=1000.0)
+)
+
+init_params_bc = [
+    (nb_r = i,
+     mean_δ = delta_bar,
+     N0 = K0 + 5, N1 = K1 + 5, N2 = K2 + 5,
+     beta_C1 = 0.2, beta_C2 = 0.05 + 0.05 * (i - 1), beta_H = 0.1, beta_G = 0.1)
+    for i in 1:n_chains
+]
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_boxcar = ddsa_hagelloch_mtheta_boxcar(K0, K1, K2, N0_max, N1_max, N2_max,
+                                             th0, th1, th2, delta, nsteps,
+                                             δ_floor_ip, K_age_boxcar)
+
+_ = sample(model_boxcar, gibbs_boxcar, 1;
+           progress=false, initial_params=init_params_bc[1])
+
+chain_bc = sample(model_boxcar, gibbs_boxcar, MCMCThreads(), n_samples, n_chains;
+                  progress=false, initial_params=init_params_bc)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+describe(chain_bc)
+```
+
+# Results
+
+## Convergence
+
+**GLCT**
+
+```{julia}
+#| echo: false
+#| output: true
+
+ess_rhat = MCMCDiagnosticTools.ess_rhat(chain)
+println("ESS and R̂:")
+ess_rhat
+```
+
+**Boxcar**
+
+```{julia}
+#| echo: false
+#| output: true
+
+ess_rhat_bc = MCMCDiagnosticTools.ess_rhat(chain_bc)
+println("Boxcar — ESS and R̂:")
+ess_rhat_bc
+```
+
+## Posterior summaries
+
+GLCT posterior means:
+```{julia}
+#| echo: false
+#| output: true
+
+β_C1_m   = mean(vec(chain[:beta_C1]))
+β_C2_m   = mean(vec(chain[:beta_C2]))
+β_H_m    = mean(vec(chain[:beta_H]))
+β_G_m    = mean(vec(chain[:beta_G]))
+mδ_v     = vec(chain[:mean_δ])
+nr_vi    = vec(chain[:nb_r])
+np_v     = nr_vi ./ (mδ_v .- δ_floor_ip .+ nr_vi)
+nb_r_m   = round(Int, mean(nr_vi))
+nb_p_m   = mean(np_v)
+mean_ip_m = mean(mδ_v)
+N0_m     = round(Int, mean(vec(chain[:N0])))
+N1_m     = round(Int, mean(vec(chain[:N1])))
+N2_m     = round(Int, mean(vec(chain[:N2])))
+
+dph_post = PhaseTypeDistributions.dph_negative_binomial_min_support(nb_r_m, nb_p_m, δ_floor_ip)
+cv_m     = sqrt(PhaseTypeDistributions.var(dph_post)) / PhaseTypeDistributions.mean(dph_post)
+
+println("β_C1  = $(round(β_C1_m,  digits=4))  (within-class 1)")
+println("β_C2  = $(round(β_C2_m,  digits=4))  (within-class 2)")
+println("β_H   = $(round(β_H_m,   digits=4))  (household: school → class 0)")
+println("β_G   = $(round(β_G_m,   digits=4))  (global uniform mixing)")
+println("nb_r  = $nb_r_m,  nb_p = $(round(nb_p_m, digits=3)) (derived),  " *
+        "mean δ = $(round(mean_ip_m, digits=2)) d  " *
+        "(joint NUTS on β's + mean_δ; δ_floor=$δ_floor_ip),  CV = $(round(cv_m, digits=3))")
+println("N0 = $N0_m (K0=$K0, observed K0/N0 at posterior-mean N0 = $(round(K0/N0_m,digits=3)))" *
+        "  prior: [$K0, $N0_max]")
+println("N1 = $N1_m (K1=$K1, observed K1/N1 at posterior-mean N1 = $(round(K1/N1_m,digits=3)))" *
+        "  prior: [$K1, $N1_max]")
+println("N2 = $N2_m (K2=$K2, observed K2/N2 at posterior-mean N2 = $(round(K2/N2_m,digits=3)))" *
+        "  prior: [$K2, $N2_max]")
+println()
+println("Comparison with Neal and Roberts M_θ structure:")
+println("  β_C1/β_C2 ratio = $(round(β_C1_m/β_C2_m, digits=2))  " *
+        "(expect > 1: younger class has higher within-class rate)")
+println("  β_H/β_G ratio   = $(round(β_H_m/β_G_m,   digits=2))  " *
+        "(mean-field β_H diluted over all class-0 × school pairs; expect < 1 vs NR individual-level)")
+```
+GLCT 95% credible intervals:
+```{julia}
+#| echo: false
+#| output: true
+
+for p in (:beta_C1, :beta_C2, :beta_H, :beta_G, :mean_δ)
+    v = vec(chain[p])
+    lo, hi = quantile(v, 0.025), quantile(v, 0.975)
+    println("  $(rpad(string(p), 10)): ($(round(lo,digits=4)), $(round(hi,digits=4)))")
+end
+lo, hi = quantile(np_v, 0.025), quantile(np_v, 0.975)
+println("  $(rpad("nb_p", 10)) (derived): ($(round(lo,digits=4)), $(round(hi,digits=4)))")
+# Discrete parameters
+for (p, label) in [(:nb_r, "nb_r"), (:N0, "N0"), (:N1, "N1"), (:N2, "N2")]
+    v = vec(chain[p])
+    lo, hi = quantile(v, 0.025), quantile(v, 0.975)
+    println("  $(rpad(label, 10)): ($(round(Int,lo)), $(round(Int,hi)))")
+end
+```
+
+Boxcar posterior means:
+```{julia}
+#| echo: false
+#| output: true
+
+bc1_bc     = mean(vec(chain_bc[:beta_C1]))
+bc2_bc     = mean(vec(chain_bc[:beta_C2]))
+bh_bc      = mean(vec(chain_bc[:beta_H]))
+bg_bc      = mean(vec(chain_bc[:beta_G]))
+mδ_bc_v    = vec(chain_bc[:mean_δ])
+nr_bc_v    = vec(chain_bc[:nb_r])
+np_bc_v    = nr_bc_v ./ (mδ_bc_v .- δ_floor_ip .+ nr_bc_v)
+mean_ip_bc = mean(mδ_bc_v)
+N0_bc      = round(Int, mean(vec(chain_bc[:N0])))
+N1_bc      = round(Int, mean(vec(chain_bc[:N1])))
+N2_bc      = round(Int, mean(vec(chain_bc[:N2])))
+
+println("β_C1  = $(round(bc1_bc,  digits=4))")
+println("β_C2  = $(round(bc2_bc,  digits=4))")
+println("β_H   = $(round(bh_bc,   digits=4))")
+println("β_G   = $(round(bg_bc,   digits=4))")
+println("nb_r  = $(round(Int, mean(nr_bc_v))),  " *
+        "nb_p = $(round(mean(np_bc_v), digits=3)),  " *
+        "mean δ = $(round(mean_ip_bc, digits=2)) d")
+println("N0 = $N0_bc  (K0=$K0, observed K0/N0 at posterior-mean N0 = $(round(K0/N0_bc,digits=3)))")
+println("N1 = $N1_bc  (K1=$K1, observed K1/N1 at posterior-mean N1 = $(round(K1/N1_bc,digits=3)))")
+println("N2 = $N2_bc  (K2=$K2, observed K2/N2 at posterior-mean N2 = $(round(K2/N2_bc,digits=3)))")
+```
+
+The table below displays the posterior means for all parameters, and both GLCT and Boxcar maps should recover essentially the same parameter values.
+
+```{julia}
+#| echo: false
+#| output: true
+
+println(rpad("Parameter", 14), rpad("GLCT", 14), "Boxcar")
+println("-"^42)
+for (lbl, dv, bv) in [
+        ("β_C1",   β_C1_m,        bc1_bc),
+        ("β_C2",   β_C2_m,        bc2_bc),
+        ("β_H",    β_H_m,         bh_bc),
+        ("β_G",    β_G_m,         bg_bc),
+        ("mean δ", mean_ip_m,     mean_ip_bc),
+        ("nb_p",   nb_p_m,        mean(np_bc_v)),
+        ("N0",     Float64(N0_m), Float64(N0_bc)),
+        ("N1",     Float64(N1_m), Float64(N1_bc)),
+        ("N2",     Float64(N2_m), Float64(N2_bc))]
+    println(rpad(lbl, 14), rpad(round(dv, digits=4), 14), round(bv, digits=4))
+end
+```
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-posteriors
+
+p1 = histogram(vec(chain[:beta_C1]); density=true, label="", title="β_C1", color=:steelblue)
+p2 = histogram(vec(chain[:beta_C2]); density=true, label="", title="β_C2", color=:tomato)
+p3 = histogram(vec(chain[:beta_H]);  density=true, label="", title="β_H",  color=:forestgreen)
+p4 = histogram(vec(chain[:beta_G]);  density=true, label="", title="β_G",  color=:purple)
+p5 = histogram(vec(chain[:mean_δ]);
+               density=true, label="", title="mean δ (calendar IP)", color=:steelblue)
+p6 = histogram(vec(chain[:N0]); density=true, label="", title="N₀ (pre-school)", color=:forestgreen)
+p7 = histogram(vec(chain[:N1]); density=true, label="", title="N₁ (class 1)",    color=:steelblue)
+p8 = histogram(vec(chain[:N2]); density=true, label="", title="N₂ (class 2)",    color=:tomato)
+plot(p1, p2, p3, p4, p5, p6, p7, p8, layout=(2,4), size=(1200, 500),
+     plot_title="GLCT posterior distributions — three-group M_θ analogue")
+```
+
+## R0
+
+The basic reproduction number for the three-group model is the dominant eigenvalue of the next-generation matrix $K$, where entry $K_{ij}$ gives the expected number of secondary infections in group $i$ caused by a single infectious individual in group $j$, introduced into a fully susceptible population.
+
+From the M_θ force-of-infection equations the NGM is:
+
+$$K = \mathrm{mean\_ip} \times \begin{pmatrix} \frac{N_0}{N_0}\beta_G & \frac{N_0}{N_1}(\beta_H+\beta_G) & \frac{N_0}{N_2}(\beta_H+\beta_G) \\ \frac{N_1}{N_0}\beta_G & \frac{N_1}{N_1}(\beta_{C1}+\beta_G) & \frac{N_1}{N_2}\beta_G \\ \frac{N_2}{N_0}\beta_G & \frac{N_2}{N_1}\beta_G & \frac{N_2}{N_2}(\beta_{C2}+\beta_G) \end{pmatrix}$$
+
+where entry $K_{ij}$ equals $(N_i/N_j) \times \beta_{ij} \times \mathrm{mean\_ip}$, with the $N_i/N_j$ factor arising because the model state variables are per-group fractions (one infected in group $j$ corresponds to fraction $1/N_j$).
+
+```{julia}
+#| echo: false
+#| output: true
+
+function compute_R0_mtheta(beta_C1, beta_C2, beta_H, beta_G, mean_ip, N0, N1, N2)
+    # State variables are per-group fractions (I_k ∈ [0,1]).
+    # One infected in group j contributes I_j = 1/N_j as a fraction.
+    # Per-day absolute infections in group i from that individual:
+    #   = N_i × β_{ij} × (1/N_j)
+    # NGM K[i,j] = (N_i/N_j) × β_{ij} × mean_ip
+    K = mean_ip .* [
+        (N0/N0)*beta_G            (N0/N1)*(beta_H + beta_G)   (N0/N2)*(beta_H + beta_G);
+        (N1/N0)*beta_G            (N1/N1)*(beta_C1 + beta_G)  (N1/N2)*beta_G;
+        (N2/N0)*beta_G            (N2/N1)*beta_G               (N2/N2)*(beta_C2 + beta_G)
+    ]
+    return maximum(real(eigvals(K)))
+end
+
+bc1_v = vec(chain[:beta_C1])
+bc2_v = vec(chain[:beta_C2])
+bh_v  = vec(chain[:beta_H])
+bg_v  = vec(chain[:beta_G])
+mip_v = vec(chain[:mean_δ])
+n0_v  = round.(Int, vec(chain[:N0]))
+n1_v  = round.(Int, vec(chain[:N1]))
+n2_v  = round.(Int, vec(chain[:N2]))
+
+R0_samples = [compute_R0_mtheta(bc1_v[i], bc2_v[i], bh_v[i], bg_v[i], mip_v[i],
+                                  n0_v[i], n1_v[i], n2_v[i])
+              for i in eachindex(bc1_v)]
+
+R0_bc_v = [compute_R0_mtheta(
+                vec(chain_bc[:beta_C1])[i], vec(chain_bc[:beta_C2])[i],
+                vec(chain_bc[:beta_H])[i],  vec(chain_bc[:beta_G])[i],
+                vec(chain_bc[:mean_δ])[i],
+                round(Int, vec(chain_bc[:N0])[i]),
+                round(Int, vec(chain_bc[:N1])[i]),
+                round(Int, vec(chain_bc[:N2])[i]))
+           for i in eachindex(vec(chain_bc[:beta_C1]))]
+
+R0_glct_mean = round(mean(R0_samples), digits=3)
+R0_glct_lo   = round(quantile(R0_samples, 0.025), digits=3)
+R0_glct_hi   = round(quantile(R0_samples, 0.975), digits=3)
+
+R0_box_mean  = round(mean(R0_bc_v), digits=3)
+R0_box_lo    = round(quantile(R0_bc_v, 0.025), digits=3)
+R0_box_hi    = round(quantile(R0_bc_v, 0.975), digits=3)
+
+R0_mean_diff = round(abs(R0_glct_mean - R0_box_mean), digits=3)
+
+println("  GLCT:   mean = $(R0_glct_mean)  95% CI = ($(R0_glct_lo), $(R0_glct_hi))")
+println("  Boxcar: mean = $(R0_box_mean)  95% CI = ($(R0_box_lo), $(R0_box_hi))")
+```
+
+## Posterior predictive checks
+
+```{julia}
+#| echo: true
+#| output: false
+
+function posterior_predictions_mtheta(chain, n_draws=200)
+    n_total = length(vec(chain[:beta_C1]))
+    idx = round.(Int, range(1, n_total, length=n_draws))
+    τ0_v = zeros(n_draws)
+    τ1_v = zeros(n_draws)
+    τ2_v = zeros(n_draws)
+    f0_m = zeros(nsteps, n_draws)
+    f1_m = zeros(nsteps, n_draws)
+    f2_m = zeros(nsteps, n_draws)
+    for (k, i) in enumerate(idx)
+        bC1 = vec(chain[:beta_C1])[i]
+        bC2 = vec(chain[:beta_C2])[i]
+        bH  = vec(chain[:beta_H])[i]
+        bG  = vec(chain[:beta_G])[i]
+        nr  = round(Int, vec(chain[:nb_r])[i])
+        mδ  = vec(chain[:mean_δ])[i]
+        np  = nr / (mδ - δ_floor_ip + nr)
+        n2_i  = round(Int, vec(chain[:N2])[i])
+        dph_i = PhaseTypeDistributions.dph_negative_binomial_min_support(nr, np, δ_floor_ip)
+        sim = run_sir_mtheta(dph_i.S, dph_i.α, bC1, bC2, bH, bG,
+                              0.0, 0.0, 1.0/n2_i, nsteps)
+        τ0_v[k] = sim.tau0
+        τ1_v[k] = sim.tau1
+        τ2_v[k] = sim.tau2
+        f0_m[:, k] .= sim.f0
+        f1_m[:, k] .= sim.f1
+        f2_m[:, k] .= sim.f2
+    end
+    return τ0_v, τ1_v, τ2_v, f0_m, f1_m, f2_m
+end
+
+τ0_post, τ1_post, τ2_post, f0_ppc, f1_ppc, f2_ppc =
+    posterior_predictions_mtheta(chain)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-ppc
+
+function ppc_bands(f_mat, K_obs)
+    pred = f_mat .* K_obs
+    lo  = [quantile(pred[t,:], 0.025) for t in axes(pred,1)]
+    mid = [quantile(pred[t,:], 0.50)  for t in axes(pred,1)]
+    hi  = [quantile(pred[t,:], 0.975) for t in axes(pred,1)]
+    return lo, mid, hi
+end
+
+days = 1:nsteps
+lo0, mid0, hi0 = ppc_bands(f0_ppc, K0)
+lo1, mid1, hi1 = ppc_bands(f1_ppc, K1)
+lo2, mid2, hi2 = ppc_bands(f2_ppc, K2)
+ymax_glct = max(1.0, maximum(vcat(th0, th1, th2, hi0, hi1, hi2)))
+
+p0 = bar(days, th0; label="Observed", color=:forestgreen, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 0 (pre-school): GLCT PPC",
+         ylims=(0, ymax_glct))
+plot!(p0, days, mid0; ribbon=(mid0.-lo0, hi0.-mid0),
+      label="95% predictive interval", color=:forestgreen, linewidth=2, fillalpha=0.3)
+
+p1 = bar(days, th1; label="Observed", color=:steelblue, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 1 (younger): GLCT PPC",
+         ylims=(0, ymax_glct))
+plot!(p1, days, mid1; ribbon=(mid1.-lo1, hi1.-mid1),
+      label="95% predictive interval", color=:steelblue, linewidth=2, fillalpha=0.3)
+
+p2 = bar(days, th2; label="Observed", color=:tomato, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 2 (older): GLCT PPC",
+         ylims=(0, ymax_glct))
+plot!(p2, days, mid2; ribbon=(mid2.-lo2, hi2.-mid2),
+      label="95% predictive interval", color=:tomato, linewidth=2, fillalpha=0.3)
+
+plot(p0, p1, p2, layout=(1,3), size=(1050, 350),
+     left_margin=5Plots.mm, bottom_margin=5Plots.mm)
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+function posterior_predictions_mtheta_boxcar(chain, n_draws=200)
+    n_total = length(vec(chain[:beta_C1]))
+    idx     = round.(Int, range(1, n_total, length=n_draws))
+    τ0_v    = zeros(n_draws);  τ1_v = zeros(n_draws);  τ2_v = zeros(n_draws)
+    f0_m    = zeros(nsteps, n_draws)
+    f1_m    = zeros(nsteps, n_draws)
+    f2_m    = zeros(nsteps, n_draws)
+    for (k, i) in enumerate(idx)
+        bC1   = vec(chain[:beta_C1])[i];  bC2 = vec(chain[:beta_C2])[i]
+        bH    = vec(chain[:beta_H])[i];   bG  = vec(chain[:beta_G])[i]
+        nr    = round(Int, vec(chain[:nb_r])[i])
+        mδ    = vec(chain[:mean_δ])[i]
+        np    = nr / (mδ - δ_floor_ip + nr)
+        n2_i  = round(Int, vec(chain[:N2])[i])
+        dph_i = PhaseTypeDistributions.dph_negative_binomial_min_support(nr, np, δ_floor_ip)
+        h_i   = hazard_vector_from_dph(dph_i, K_age_boxcar)
+        sim   = run_sir_mtheta_boxcar(h_i, K_age_boxcar, bC1, bC2, bH, bG,
+                                       0.0, 0.0, 1.0/n2_i, nsteps)
+        τ0_v[k] = sim.tau0;  τ1_v[k] = sim.tau1;  τ2_v[k] = sim.tau2
+        f0_m[:, k] .= sim.f0;  f1_m[:, k] .= sim.f1;  f2_m[:, k] .= sim.f2
+    end
+    return τ0_v, τ1_v, τ2_v, f0_m, f1_m, f2_m
+end
+
+τ0_bc, τ1_bc, τ2_bc, f0_ppc_bc, f1_ppc_bc, f2_ppc_bc =
+    posterior_predictions_mtheta_boxcar(chain_bc)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-ppc-boxcar
+
+lo0_bc, mid0_bc, hi0_bc = ppc_bands(f0_ppc_bc, K0)
+lo1_bc, mid1_bc, hi1_bc = ppc_bands(f1_ppc_bc, K1)
+lo2_bc, mid2_bc, hi2_bc = ppc_bands(f2_ppc_bc, K2)
+ymax_boxcar = max(1.0, maximum(vcat(th0, th1, th2, hi0_bc, hi1_bc, hi2_bc)))
+
+p0 = bar(days, th0; label="Observed", color=:forestgreen, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 0 (pre-school): Boxcar PPC",
+         ylims=(0, ymax_boxcar))
+plot!(p0, days, mid0_bc; ribbon=(mid0_bc.-lo0_bc, hi0_bc.-mid0_bc),
+      label="95% predictive interval", color=:forestgreen, linewidth=2, fillalpha=0.3)
+
+p1 = bar(days, th1; label="Observed", color=:steelblue, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 1 (younger): Boxcar PPC",
+         ylims=(0, ymax_boxcar))
+plot!(p1, days, mid1_bc; ribbon=(mid1_bc.-lo1_bc, hi1_bc.-mid1_bc),
+      label="95% predictive interval", color=:steelblue, linewidth=2, fillalpha=0.3)
+
+p2 = bar(days, th2; label="Observed", color=:tomato, alpha=0.5,
+         xlabel="Day", ylabel="New infections", title="Class 2 (older): Boxcar PPC",
+         ylims=(0, ymax_boxcar))
+plot!(p2, days, mid2_bc; ribbon=(mid2_bc.-lo2_bc, hi2_bc.-mid2_bc),
+      label="95% predictive interval", color=:tomato, linewidth=2, fillalpha=0.3)
+
+plot(p0, p1, p2, layout=(1,3), size=(1050, 350),
+     left_margin=5Plots.mm, bottom_margin=5Plots.mm)
+```
+
+## Recovery interval fit
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-recovery-ppc
+
+dmin, dmax = extrema(delta)
+ts      = dmin:dmax
+pmf_dph = [PhaseTypeDistributions.pmf(dph_post, k) for k in ts]
+bin_edges = collect((dmin - 0.5):1.0:(dmax + 0.5))
+
+p_rec = histogram(delta; normalize=:pdf, bins=bin_edges,
+                  label="Observed (all groups)", color=:gray, alpha=0.6,
+                  xlabel="Infectious period (days)", ylabel="Probability",
+                  title="Recovery intervals: posterior DPH vs data")
+plot!(p_rec, collect(ts), pmf_dph; linewidth=2, color=:steelblue,
+      label="DPH-NegBin + NR offset (r=$nb_r_m, p=$(round(nb_p_m,digits=3)))")
+println("Empirical mean δ = $(round(mean(delta),digits=2)) d,  " *
+        "DPH posterior mean δ = $(round(PhaseTypeDistributions.mean(dph_post),digits=2)) d")
+p_rec
+```
+
+# Discussion
+
+We developed a mean-field analogue of Neal & Roberts (2004) with grouped compartments. Neal & Roberts (2004) explicitly set $n = m = 188$ for their analysis: the susceptible population size equals the total number of infected individuals, implying a 100% attack rate across all three groups. They justify this by noting that 185 of 197 children under 14 were infected, and that the 12 non-infected children were either infants carrying placental immunity, children kept in total isolation, a two-year-old who did not attend school, or an immigrant who had previously had measles.
+
+In our DDSA model, all three susceptible population sizes are inferred jointly via Binomial final-size constraints, with priors derived from the number of children under 14: $N_{\mathrm{total}} = 197$ (Neal \& Roberts, 2004). This yields $N_0 \in [90,99]$, $N_1 \in [30,39]$, $N_2 \in [68,77]$, ranges that are consistent with Neal \& Roberts' n=m=188 assumption (nearly 100% attack rate) while allowing the data to determine where within those bounds the posterior concentrates.
+
+We note that the $\beta$ parameter values are not directly comparable in scale: Neal & Roberts use individual-to-individual per-day rates; our mean-field formulation uses $\beta \times I \times S$. Thus, we present a qualitative comparison of the parameter structure.
+
+Neal & Roberts' full model included a spatial distance-decay term; in the non-spatial comparison considered here, this corresponds to setting $\theta = 0$ so the global component reduces to uniform mixing. A separate distinction concerns household transmission. In the NR individual-level model, $\beta_H$ applies only to genuine household pairs (a Class 0 child is exposed via $\beta_H$ only to infectious school-age siblings in the same household). In our mean-field analogue, the household term enters at the group level and is applied across all (Class 0) $\times$ (Class 1 + Class 2) pairs. This difference affects the scale of $\beta_H$: to match an aggregate household contribution, the mean-field $\beta_H$ is typically smaller (spread over many more potential pairs), and transmission not attributed to $\beta_H$ is absorbed by $\beta_G$.
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("Population treatment (all three N inferred via Binomial final-size):")
+println("  N0 = $(N0_m) [$(K0), $(N0_max)]  →  K0=$(K0)/N0=$(N0_m) = $(round(100K0/N0_m,digits=1))%")
+println("  N1 = $(N1_m) [$(K1), $(N1_max)]  →  K1=$(K1)/N1=$(N1_m) = $(round(100K1/N1_m,digits=1))%")
+println("  N2 = $(N2_m) [$(K2), $(N2_max)]  →  K2=$(K2)/N2=$(N2_m) = $(round(100K2/N2_m,digits=1))%")
+println("  (NR n=m=188 implies 100% attack rate; DDSA infers from data within census bounds)")
+println()
+println("Qualitative checks:")
+println("  1. β_C1 > β_C2:  $(β_C1_m > β_C2_m)  " *
+        "(NR: evidence for different classroom rates)")
+println("  2. β_H > 0:      $(β_H_m > 0)  (NR: strong household effect)")
+println("  3. β_G > 0:      $(β_G_m > 0)  (NR: global mixing component)")
+println("  4. P(β_C1>β_C2) = $(round(mean(vec(chain[:beta_C1]) .> vec(chain[:beta_C2])),digits=3))")
+```
+
+The posterior attack rate for Class 1 ($\hat{\tau}_1 \approx K_1/N_1$) is consistent with DDSA recovering both the transmission dynamics and final size for internally homogeneous groups. The underprediction of attack rates for Classes 0 and 2 ($\hat{\tau} \approx 0.74$--$0.77$ vs observed $\approx 0.88$--$0.92$) is a consequence of the mean-field approximation applied to groups with heterogeneous internal contact structure, and the $\beta$ estimates for these groups should be interpreted accordingly. A wider choice of $N_{\mathrm{total}}$ (i.e.\ relaxing the census bound of 197 children under 14) would increase the uncertainty on $N_0$ and $N_2$ but would not qualitatively change the recovered parameter ordering or the $\beta_{C1} > \beta_{C2}$ finding.
+
+For the infectious period, `dph_negative_binomial_min_support` enforces $r \leq \delta_{\min}$ when $\delta_{\min}$ is the calendar minimum (here, 4 days), so $r$ cannot exceed 4 in this construction. The dwell-time parameters are in any case estimated jointly with transmission. A hard upper bound on $r$ can make residual marginal misfit interpretable as a model-class limit rather than as precise identification of $r$, but the fit is still consistent with the data.
+
+```{julia}
+#| echo: false
+#| output: true
+
+q025(v) = quantile(v, 0.025)
+q975(v) = quantile(v, 0.975)
+
+for (label, K, N_m, post, sym) in [
+        ("Class 0", K0, N0_m, τ0_post, :N0),
+        ("Class 1", K1, N1_m, τ1_post, :N1),
+        ("Class 2", K2, N2_m, τ2_post, :N2)]
+    N_ci_lo = round(Int, q025(vec(chain[sym])))
+    N_ci_hi = round(Int, q975(vec(chain[sym])))
+    println("$label:  K=$K,  N=$(N_m) [$(N_ci_lo), $(N_ci_hi)]  " *
+            "observed K/N at posterior-mean N=$(round(K/N_m,digits=3))  " *
+            "model-implied posterior τ=$(round(mean(post),digits=3))  " *
+            "[$(round(q025(post),digits=3)), $(round(q975(post),digits=3))]")
+end
+```
+
+In the observed data, Class 1 infection times cluster around days 21–28 while Class 2's main wave spans days 26–40, so `P(Class 1 peaks after Class 2)` near zero. Another check is that `P(Class 0 peaks after Class 1)` should be close to 1, confirming that the household-driven pre-school epidemic is correctly identified as a downstream consequence of the school outbreak.
+
+```{julia}
+#| echo: false
+#| output: true
+
+peak0 = [argmax(f0_ppc[:, k]) for k in axes(f0_ppc, 2)]
+peak1 = [argmax(f1_ppc[:, k]) for k in axes(f1_ppc, 2)]
+peak2 = [argmax(f2_ppc[:, k]) for k in axes(f2_ppc, 2)]
+
+println("Mean peak days:  Class 0=$(round(mean(peak0), digits=1)),  " *
+        "Class 1=$(round(mean(peak1), digits=1)),  Class 2=$(round(mean(peak2), digits=1))")
+println("P(Class 1 peaks after Class 2) = $(round(mean(peak1 .>= peak2), digits=3))")
+println("  → expected near 0: Class 1 should peak before Class 2's main wave")
+println("P(Class 0 peaks after Class 1) = $(round(mean(peak0 .>= peak1), digits=3))")
+println("  → expected near 1: pre-school wave is driven by household transmission from school children")
+```
+
+In sum, both GLCT and Boxcar implementations produce consistent posteriors across all parameters, confirming that the two formulations are equivalent. Convergence is clean for $\beta_{C1}$ ($\hat{R} \approx 1.01$--$1.03$ across the two implementations) but remains only marginal for $\beta_{C2}$, $\beta_H$, and $\beta_G$ ($\hat{R} \approx 1.05$--$1.09$), reflecting the limited identifiability of the household and global terms under mean-field contact structure. Despite this, the model captures the primary qualitative dynamics by recovering a higher transmission rate in the younger school class compared to the older class with posterior probability $P(\beta_{C1}>\beta_{C2}) = 0.994$. It also identifies a positive household transmission route ($\beta_H > 0$), which characterises the pre-school epidemic as a secondary wave following the school outbreak, and gives consistent reproduction-number estimates between implementations (GLCT $R_0 \approx 2.187$ vs Boxcar $R_0 \approx 2.179$). Although the model underpredicts attack rates for certain classes due to aggregating heterogeneous contact structure into mean-field terms, these results do not alter the directional findings.

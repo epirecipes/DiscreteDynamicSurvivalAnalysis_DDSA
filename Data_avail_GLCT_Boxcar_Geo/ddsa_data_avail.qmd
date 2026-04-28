@@ -1,0 +1,1572 @@
+---
+title: "DDSA data-availability scenarios"
+author: "Sandra Montes (`@slmontes`)"
+date: 2026-03-31
+format:
+    pdf:
+        code-overflow: wrap
+        engine: xelatex
+        fig-format: pdf
+    html:
+        code-overflow: wrap
+    gfm: default
+execute:
+    cache: false
+engine: julia
+julia:
+    exeflags: ["--project=@."]
+    env: ["JULIA_NUM_THREADS=10"]
+---
+
+# Introduction
+
+DDSA splits the log-likelihood into three parts: the infection-time Multinomial term $\ell_I$, the recovery-interval phase-type term $\ell_R$, and the Binomial final-size constraint $\ell_\text{constr}$. Each piece contributes different information about transmission. In practice, line lists are often incomplete: contact-tracing programmes may capture infection onset times without follow-up on recovery, or hospital records may provide recovery durations without precise transmission dates. This notebook measures what each likelihood component contributes by fitting DDSA under three data-availability scenarios on one synthetic line list ($N=99$, $\rho=0.01$, $\Delta t=1$\,d, $T=40$\,d). In every scenario, we compare three infectious-period models: GLCT, Boxcar, and Geometric.
+
+| Scenario | Observed data | Likelihood | Parameters identified |
+|:---|:---|:---|:---|
+| A — Full | Infection times, recovery intervals, final size | $\ell_I + \ell_R + \ell_\text{constr}$ | $\beta$, $\rho$, $r$, $p$; mean IP $= r/p$ |
+| B — Infection only | Infection times and final size | $\ell_I + \ell_\text{constr}$ | $\beta$, $\rho$, $p$, $R_0$; $r$ fixed by model comparison |
+| C — Recovery only | Recovery intervals | $\ell_R$ | $r$, $p$; $\beta$ and $\rho$ not identifiable |
+
+The simulator uses a continuous Erlang infectious period with mean $\mu=4$\,d, then embeds it in discrete time at $\Delta t=1$\,d using per-step transition probabilities from constant hazards (i.e. $p = 1-e^{-r\Delta t}$). This discretisation increases the mean relative to the continuous target: in the discrete model, the expected infectious duration is $E[W]\approx 6.33$\,d (for $\mu=4$\,d at $\Delta t=1$\,d). We therefore use $E[W]$, not $\mu$, as the reference for posterior comparisons. We calibrate transmission as $\beta_\text{rate}=R_0^\text{cal}/\mu=0.5$\,d$^{-1}$ (with $R_0^\text{cal}=2$), which implies a discrete-time reproduction number $R_0^\text{imp}=\beta_\text{true}\times E[W]=3.164$. That value is the target when comparing posterior $R_0=\beta\cdot r/p$. Inference uses a flexible NegBin-DPH parameterisation $(r,p)$ with mean IP $=r/p$, and does not force $r$ to match the simulator’s Erlang stage count $k=4$.
+
+In Scenario B, the NegBin shape $r$ is not jointly identifiable with $(\beta,\rho,p)$ from incidence alone: many $(r,p,R_0)$ combinations generate almost the same epidemic trajectory, so the joint posterior mixes poorly. To address this, we treat $r$ as a model index and choose it with PSIS-LOO [(Vehtari, Gelman and Gabry, 2017)](https://link.springer.com/article/10.1007/S11222-016-9696-4). For each candidate $r\in\{1,\ldots,10\}$, we fit a short NUTS chain under the infection-only model and compute LOO over $K+1$ pointwise log-likelihood terms: the final-size term $\log p(K\mid\theta)$ and the $K$ individual infection-time terms $\log p(t_i\mid\theta)$. Together these factorise $\log p(K,\mathbf{th}\mid\theta)$. We then fix $r$ at the value that maximises $\mathrm{ELPD}_{\mathrm{LOO}}$ for Scenario B inference. The Geometric sub-scenario ($r\equiv1$) does not need this selection step.
+
+## Libraries
+
+The analysis uses Turing.jl for Bayesian inference, ParetoSmooth.jl for PSIS-LOO model comparison, and a local `PhaseTypeDistributions.jl` module for discrete phase-type distributions. We also apply a small compatibility patch at load time so the Gibbs+MH step over the discrete shape parameter $r$ works reliably with different Turing versions.
+
+```{julia}
+#| echo: true
+#| output: false
+
+using Random, LinearAlgebra, Statistics, Dates
+using Turing
+using StatsPlots
+using Distributions
+using StatsFuns: binomlogpdf
+using ParetoSmooth
+using Plots
+using MCMCChains, DataFrames, Statistics
+import Statistics: mean, var, std, median, quantile
+
+if !isdefined(Main, :PhaseTypeDistributions)
+    include("./PhaseTypeDistributions.jl")
+end
+using .PhaseTypeDistributions
+```
+
+### Turing/DynamicPPL compatibility patch
+
+In Gibbs+MH runs, warmup and chain merging can call `Base.copy` on internal inference-store objects. Some package versions do not define these methods, which can trigger runtime errors. The guarded definitions below are safe no-ops when the relevant types are absent (or already fixed upstream).
+```{julia}
+#| echo: true
+#| output: false
+let Ti = Turing.Inference
+    if isdefined(Ti, :StoreLinkedValues)
+        Ty = getfield(Ti, :StoreLinkedValues)
+        @eval Base.copy(::$Ty) = $Ty()
+    end
+    if isdefined(Ti, :StoreUnspecifiedPriors)
+        Ty = getfield(Ti, :StoreUnspecifiedPriors)
+        @eval Base.copy(x::$Ty) = $Ty(copy(x.vns_with_proposal))
+    end
+end
+```
+
+```{julia}
+#| echo: true
+#| output: false
+Random.seed!(1234)
+```
+
+## Parameters
+
+Here we define simulation settings and build the discrete DPH used to generate the synthetic data (daily line list, $Δt=1$\,d, horizon $T=40$\,d). The printed output reports the effective discrete mean ($E[W]$), the infectious-period coefficient of variation ($CV$), and the implied reproduction number ($R_0^\text{imp}=\beta_\text{true}\times E[W]$), which is the reference target used in the results.
+
+```{julia}
+#| echo: true
+#| output: false
+
+R0_cal = 2.0       # continuous calibration target; β_rate = R0_cal/μ_ip
+ρ_true = 0.01
+μ_ip   = 4.0       # continuous Erlang mean (not the discrete E[W])
+k      = 4         # Erlang stages in simulator
+Δt_nom = 1.0       # one MCMC/map step = one day; per-stage g = 1 - exp(-(k/μ_ip)*Δt_nom)
+tspan  = (0.0, 40.0)
+nsteps = Int(round(tspan[2] / Δt_nom))
+
+β_rate = R0_cal / μ_ip             # day^-1; before dwell discretisation
+β_true = β_rate * Δt_nom           # per-step coefficient in simulate_discrete_glct
+β_prior_hi = 2.5                   # upper bound for β ~ Uniform(1e-4, β_prior_hi) 
+
+
+dph_nom = PhaseTypeDistributions.dph_erlang_from_mean(k, μ_ip, Δt_nom)
+nb_r    = k                        # shape of the continuous simulator Erlang k 
+nb_mean = PhaseTypeDistributions.mean(dph_nom)   # discrete E[W]
+nb_cv   = sqrt(PhaseTypeDistributions.var(dph_nom)) / nb_mean  # coefficient of variation
+nb_p    = k / μ_ip                 # continuous Erlang rate (as reference)
+R0_imp = β_true * nb_mean          # Implied R₀: R₀_imp = β × E[W] (discrete)
+
+K_age   = findfirst(kk -> PhaseTypeDistributions.cdf(dph_nom, kk) >= 0.999, 1:500)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Simulator: k=$k stages, μ_ip=$μ_ip d (continuous-time mean infectious period), Δt=$Δt_nom d → discrete E[W] = $(round(nb_mean, digits=3)) d, " *
+        "CV = $(round(nb_cv, digits=3)), β_true = $(β_true)/step")
+println("  R₀_cal = $R0_cal uses μ_ip only for β_rate = R₀_cal/μ_ip (does not equal β_true×E[W]).")
+println("  R₀_imp = β_true × E[W] = $(round(R0_imp, digits=3)) — Reference to compare to posterior R₀.")
+println("nsteps = $nsteps")
+```
+
+## Utility functions
+
+In this we section define the helper functions used across all scenarios: safe normalisation of incidence probability vectors, conversion of rates to per-step proportions, discrete hazard computation from phase-type and standard distributions, and expansion of an incidence histogram into individual infection-time records for PSIS-LOO scoring.
+
+```{julia}
+#| echo: true
+#| output: false
+
+"""Safely normalise a non-negative vector to sum to 1."""
+function safe_normalise(f::AbstractVector{T}, n::Int) where T
+    f_pos = ifelse.(isnan.(f) .| .!isfinite.(f), zero(T), max.(f, zero(T)))
+    sF = sum(f_pos)
+    (sF > T(1e-15) && isfinite(sF)) ? f_pos ./ sF : fill(one(T)/n, n)
+end
+
+"""Shared x-axis limits for mean infectious period (r/p) KDE plots: zoom to pooled quantiles."""
+function mean_ip_density_xlims(vectors...; qlo=0.03, qhi=0.97, pad_frac=0.06)
+    parts = [vec(v) for v in vectors if length(v) > 0]
+    isempty(parts) && return (0.0, 15.0)
+    v = reduce(vcat, parts)
+    lo, hi = quantile(v, qlo), quantile(v, qhi)
+    pad = max(pad_frac * (hi - lo), 0.5)
+    return (max(0.0, lo - pad), hi + pad)
+end
+
+"""Convert a rate to a proportion over a unit time interval."""
+@inline function rate_to_proportion(r, t=1.0)
+    if r < 0 || isnan(r)
+        return 0.0
+    elseif isinf(r)
+        return 1.0
+    else
+        result = 1 - exp(-r * t)
+        return isnan(result) ? 0.0 : max(min(result, 1.0), 0.0)
+    end
+end
+
+"""Discrete hazard h[k] = P(W=k)/P(W≥k) for NegBin(r,p) parameters; AD-compatible."""
+function hazard_vector_negbin(nb_r::Integer, nb_p::T, K::Integer) where T <: Real
+    pmf_vals = Vector{T}(undef, K)
+    for k in 1:K
+        if k < nb_r
+            pmf_vals[k] = zero(T)
+        else
+            lp = PhaseTypeDistributions.negbin_total_logpdf(k, nb_r, nb_p)
+            pmf_vals[k] = isfinite(lp) ? exp(lp) : zero(T)
+        end
+    end
+    sf = reverse(cumsum(reverse(pmf_vals)))
+    h  = Vector{T}(undef, K)
+    for i in 1:K
+        h[i] = (sf[i] > zero(T) && isfinite(sf[i])) ? pmf_vals[i] / sf[i] : T(0.01)
+    end
+    h[end] = one(T)
+    return clamp.(h, zero(T), one(T))
+end
+```
+
+# Boxcar SIR simulation
+
+The Boxcar model represents the infectious period with explicit infection-age cohorts: newly infected individuals enter the first age class, then move through $r$ classes one step at a time, leaving each class according to the NegBin hazard. Its incidence term, $\beta(\sum I)S$, matches the GLCT forward map. So for a fixed $(\beta,\rho)$ and dwell-time distribution, the two formulations induce the same epidemic trajectory and should produce equivalent posteriors on the same data.
+
+```{julia}
+#| echo: true
+#| output: false
+
+function sir_boxcar_map!(du, u, p, t)
+    (β, h, K, Δt) = p
+    Tel = eltype(u)
+    S = u[1]
+    ΣI = sum(u[2:K+1])
+    R = u[K+2]
+    # Probability-per-step infection update (hazard -> event probability).
+    p_inf = rate_to_proportion(β * ΣI, Δt)
+    new_inf = p_inf * S
+    du[1] = S - new_inf
+    du[K+2] = R
+    @inbounds begin
+        du[2] = new_inf
+        for k in 2:K
+            du[k+1] = zero(Tel)
+        end
+    end
+    @inbounds for k in 1:K
+        current_I = u[k+1]
+        leave = current_I * h[k]
+        stay = current_I - leave
+        if k < K
+            du[k+2] += stay
+        end
+        du[K+2] += leave
+    end
+    return nothing
+end
+
+function simulate_boxcar(β, h_rec, ρ, nsteps, K_age_classes, Δt)
+    Tel = promote_type(typeof(β), eltype(h_rec), typeof(ρ))
+    u0 = zeros(Tel, K_age_classes + 2)
+    u0[1] = one(Tel) - ρ
+    u0[2] = ρ
+    u0[K_age_classes+2] = zero(Tel)
+    sol = zeros(Tel, K_age_classes + 2, nsteps + 1)
+    sol[:, 1] = u0
+    p = (β, h_rec, K_age_classes, Δt)
+    for t in 2:(nsteps+1)
+        u_next = zeros(Tel, length(u0))
+        sir_boxcar_map!(u_next, sol[:, t-1], p, t - 1)
+        # NUTS + ForwardDiff can explore extreme parameters; keep S,I,R nonnegative and
+        # S on [0,1] so τ = S(0)−S(T) stays finite (avoids NaN Dual in Binomial(N,τ)).
+        u_next[1] = max(zero(Tel), min(one(Tel), u_next[1]))
+        u_next[K_age_classes+2] = max(zero(Tel), u_next[K_age_classes+2])
+        @inbounds for i in 2:(K_age_classes+1)
+            u_next[i] = max(zero(Tel), u_next[i])
+        end
+        sol[:, t] = u_next
+    end
+    τ = u0[1] - sol[1, end]
+    f = zeros(Tel, nsteps)
+    for tt in 1:nsteps
+        f[tt] = tt == 1 ? sol[1, 1] - sol[1, 2] : sol[1, tt] - sol[1, tt+1]
+    end
+    if sum(f) > 0
+        f = f / sum(f)
+    else
+        f = fill(one(Tel)/nsteps, nsteps)
+    end
+    return sol, τ, f
+end
+```
+
+# Discrete GLCT simulation
+
+The GLCT forward map iterates the discrete SIR system using the phase-type transition matrix for the infectious period. At each step, new infections are distributed across infection stages according to the initial probability vector $\alpha$, existing infections advance through the sub-transition matrix $T$, and absorptions accumulate in the recovered class. The incidence probability mass function is obtained from the successive decrements in $S$.
+
+```{julia}
+#| echo: true
+#| output: false
+
+function simulate_discrete_glct(Tm::AbstractMatrix, α::AbstractVector, β::Real, ρ::Real, nsteps::Int, Δt::Real)
+    k = length(α)
+    @assert size(Tm, 1) == k == size(Tm, 2) "Tm must be k×k"
+    S = 1.0 - ρ
+    x = α .* ρ
+    R = zero(ρ)
+    S_hist = Any[S]
+    I_hist = Any[sum(x)]
+    R_hist = Any[R]
+    times = collect(0.0:Δt:(nsteps*Δt))
+    for _ in 1:nsteps
+        I = sum(x)
+        # Probability-per-step infection update (hazard -> event probability).
+        p_inf = rate_to_proportion(β * I, Δt)
+        new_inf = p_inf * S
+        x = Tm' * x + α .* new_inf
+        absorption_probs = ones(eltype(α), k) - Tm * ones(eltype(α), k)
+        recov = dot(absorption_probs, x)
+        S = S - new_inf
+        R = R + recov
+        push!(S_hist, S)
+        push!(I_hist, sum(x))
+        push!(R_hist, R)
+    end
+    τ = S_hist[1] - S_hist[end]
+    dS = diff(S_hist)
+    f = max.(-dS, 0.0)
+    sF = sum(f)
+    f = sF > 0 ? f ./ sF : fill(one(eltype(f))/length(f), length(f))
+    return (times=times, S=S_hist, I=I_hist, R=R_hist, τ=τ, f=f)
+end
+```
+
+# Synthetic line list
+
+The synthetic dataset is generated in three steps: the deterministic GLCT forward map produces the final attack rate $\tau$ and incidence PMF $f$; the observed final size $K$ is then drawn from $\text{Binomial}(N,\tau)$ and individual infection times from $\text{Multinomial}(K,f)$; and each infectious period $\delta_i$ is sampled from the Erlang-4 DPH by inverse CDF. All three scenarios condition on the same single realisation of $(K, \mathbf{th}, \boldsymbol{\delta})$.
+
+```{julia}
+#| echo: true
+#| output: false
+
+function generate_discrete_glct_data(β, Tm, α, ρ, N, M, n_events, Δt; rng::Union{Nothing,Random.AbstractRNG}=nothing)
+    result = simulate_discrete_glct(Tm, α, β, ρ, n_events, Δt)
+    τ = result.τ
+    f = result.f
+    K = isnothing(rng) ? rand(Binomial(N, τ)) : rand(rng, Binomial(N, τ))
+    if K > 0 && length(f) > 0
+        if length(f) != n_events
+            f = f[1:n_events]
+        end
+        if sum(f) > 0
+            f = f / sum(f)
+        else
+            f = fill(1.0/n_events, n_events)
+        end
+        th = isnothing(rng) ? rand(Multinomial(K, f)) : rand(rng, Multinomial(K, f))
+    else
+        th = zeros(Int, n_events)
+    end
+    delta = Int[]
+    if M + K > 0
+        dph = PhaseTypeDistributions.DPH(α, Tm)
+        for _ in 1:(M + K)
+            u = isnothing(rng) ? rand() : rand(rng)
+            cum_prob = 0.0
+            recovery_time = 1
+            while cum_prob < u
+                pmf_val = PhaseTypeDistributions.pmf(dph, recovery_time)
+                cum_prob += pmf_val
+                cum_prob >= u && break
+                recovery_time += 1
+            end
+            push!(delta, recovery_time)
+        end
+    end
+    return Dict(:K => K, :th => th, :delta => delta, :τ => τ, :f => f)
+end
+```
+
+# Turing models
+
+The following subsections define the Turing.jl probabilistic models for each scenario and infectious-period representation. All models share the same discrete epidemic forward map and differ only in which likelihood components are active and which parameters are estimated.
+
+## Scenario A — Full data ($\ell_I + \ell_R + \ell_\text{constr}$)
+
+Scenario A uses the complete likelihood: the incidence histogram and final size constrain the transmission parameters $(\beta, \rho)$, while the individual recovery intervals identify the infectious period shape $(r, p)$. With all three data streams present, the phase count $r$ is sampled jointly with the continuous parameters via a Gibbs step.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function dph_full(N::Int, M::Int, nsteps::Int, K::Int,
+                          th::Vector{Int}, delta::Vector{Int},
+                          nb_r_max::Int, Δt::Float64)
+    # NegBin-DPH; Binomial/Multinomial for epidemic data; delta ~ DPH
+    β    ~ Uniform(1e-4, β_prior_hi)
+    ρ    ~ Beta(1.0, N - 1)
+    nb_p ~ Beta(1.0, 1.0)
+    nb_r ~ DiscreteUniform(1, nb_r_max)
+
+    dph     = PhaseTypeDistributions.dph_negative_binomial(nb_r, nb_p)
+    result  = simulate_discrete_glct(dph.S, dph.α, β, ρ, nsteps, Δt)
+    τ_valid = clamp(result.τ, 0.001, 0.999)
+    f_safe  = safe_normalise(result.f, nsteps)
+
+    K ~ Binomial(N, τ_valid)
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+    for i in 1:(M + K)
+        delta[i] ~ dph
+    end
+
+    return (β=β, nb_r=nb_r, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+## Scenario B — Infection times with fixed phase count ($r$ from PSIS-LOO)
+
+Scenario B uses only the infection-time likelihood $\ell_I + \ell_\text{constr}$, with $r$ fixed to the PSIS-LOO-selected value (see Introduction). The model is reparameterised in terms of $R_0$ and $p$, with $\beta = R_0\,p/r$ derived deterministically, so that the sampler operates on the better-identified composite $(R_0, p, \rho)$ rather than on $(\beta, p, \rho)$ directly.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function dph_infonly(N::Int, M::Int, nsteps::Int, K::Int,
+                             th::Vector{Int}, Δt::Float64,
+                             nb_r_max_prior::Int=10, nb_r_fixed::Int=0)
+    # With r fixed: R₀ ~ Uniform, nb_p ~ Beta; β = R₀ * nb_p / r so R₀ = β * (r/nb_p).
+    R₀      ~ Uniform(0.5, 5.0)
+    ρ       ~ Beta(1.0, N - 1)
+    nb_p    ~ Beta(1.0, 1.0)
+    if nb_r_fixed > 0
+        nb_r = nb_r_fixed
+    else
+        nb_r ~ DiscreteUniform(1, nb_r_max_prior)
+    end
+    β       = R₀ * nb_p / nb_r
+    if !(0 < nb_p ≤ 1 && β > 0)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+
+    dph     = PhaseTypeDistributions.dph_negative_binomial(nb_r, nb_p)
+    result  = simulate_discrete_glct(dph.S, dph.α, β, ρ, nsteps, Δt)
+    # Reject non-finite τ before clamp to avoid NaN poisoning AD gradients.
+    if !isfinite(result.τ) || any(x -> !isfinite(x), result.f)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    τ_valid = clamp(result.τ, 0.001, 0.999)
+    if !isfinite(τ_valid)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    f_safe  = safe_normalise(result.f, nsteps)
+
+    lb = binomlogpdf(N, τ_valid, K)  # AD-safe; avoids Binomial(N,p) constructor on Dual types
+    Turing.@addlogprob! isfinite(lb) ? lb : -Inf
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+
+    return (β=β, R₀=R₀, nb_r=nb_r, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+## Scenario C — Recovery times only ($\ell_R$)
+
+Without infection time data, the transmission rate $\beta$ and initial fraction $\rho$ are not identified. We estimate only the infectious period distribution parameters $(r, p)$ directly from recovery intervals.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function dph_reconly(delta::Vector{Int}, nb_r_max::Int)
+    nb_r    ~ DiscreteUniform(1, nb_r_max)
+    nb_p    ~ Beta(1.0, 1.0)
+    dph     = PhaseTypeDistributions.dph_negative_binomial(nb_r, nb_p)
+    for i in 1:length(delta)
+        delta[i] ~ dph
+    end
+    return (nb_r=nb_r, nb_p=nb_p)
+end
+```
+
+## Scenario C — Recovery times only (Geometric baseline)
+
+The Geometric model for recovery-only inference estimates $p$ from $\delta_i$ directly. Since Geometric $\equiv$ NegBin$(r=1)$ has a single parameter, this is a NUTS-only run with no Metropolis-Hastings step required.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function geo_reconly(delta::Vector{Int})
+    nb_p ~ Beta(1.0, 1.0)
+    dph_geo = PhaseTypeDistributions.dph_geometric(nb_p)
+    for i in 1:length(delta)
+        delta[i] ~ dph_geo
+    end
+    return (nb_p=nb_p,)
+end
+```
+
+## Geometric baseline — Scenario A ($\ell_I + \ell_R + \ell_\text{constr}$)
+
+The geometric model is the memoryless special case of the NegBin DPH, equivalent to a single exponential infectious stage ($r=1$). Fitting it alongside the DPH model under the full likelihood quantifies the cost of assuming exponential dwell times when the true infectious period has lower coefficient of variation.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function geo_full(N::Int, M::Int, nsteps::Int, K::Int,
+                          th::Vector{Int}, delta::Vector{Int},
+                          Δt::Float64)
+    β    ~ Uniform(1e-4, β_prior_hi)
+    ρ    ~ Beta(1.0, N - 1)
+    nb_p ~ Beta(1.0, 1.0)
+
+    dph_geo = PhaseTypeDistributions.dph_geometric(nb_p)
+    result  = simulate_discrete_glct(dph_geo.S, dph_geo.α, β, ρ, nsteps, Δt)
+    τ_valid = clamp(result.τ, 0.001, 0.999)
+    f_safe  = safe_normalise(result.f, nsteps)
+
+    K ~ Binomial(N, τ_valid)
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+    for i in 1:(M + K)
+        delta[i] ~ dph_geo
+    end
+
+    return (β=β, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+## Geometric baseline — Scenario B ($\ell_I + \ell_\text{constr}$)
+
+Under Scenario B, the geometric model requires no shape selection step since $r \equiv 1$ is fixed by definition. This provides a clean infection-only baseline against which the GLCT and Boxcar results can be compared.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function geo_infonly(N::Int, M::Int, nsteps::Int, K::Int,
+                             th::Vector{Int}, Δt::Float64)
+    β    ~ Uniform(1e-4, β_prior_hi)
+    ρ    ~ Beta(1.0, N - 1)
+    nb_p ~ Beta(1.0, 1.0)
+
+    dph_geo = PhaseTypeDistributions.dph_geometric(nb_p)
+    result  = simulate_discrete_glct(dph_geo.S, dph_geo.α, β, ρ, nsteps, Δt)
+    τ_valid = clamp(result.τ, 0.001, 0.999)
+    f_safe  = safe_normalise(result.f, nsteps)
+
+    K ~ Binomial(N, τ_valid)
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+    # NO recovery likelihood
+
+    return (β=β, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+## Boxcar — Scenario A ($\ell_I + \ell_R + \ell_\text{constr}$)
+
+The Boxcar model is the infection-age representation of the same NegBin DPH likelihood. Its state space has dimension $K_\text{age}+2$ (vs $r+2$ for DPH), but it is mathematically equivalent. Both correctly-specified models should produce identical posteriors on the same data.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function boxcar_full(N::Int, M::Int, nsteps::Int, K::Int,
+                             th::Vector{Int}, delta::Vector{Int},
+                             K_age_classes::Int, nb_r_max::Int, Δt::Float64)
+    β    ~ Uniform(1e-4, β_prior_hi)
+    ρ    ~ Beta(1.0, N - 1)
+    nb_p ~ Beta(1.0, 1.0)
+    nb_r ~ DiscreteUniform(1, nb_r_max)
+
+    dph_bc  = PhaseTypeDistributions.dph_negative_binomial(nb_r, nb_p)
+    h_rec   = hazard_vector_negbin(nb_r, nb_p, K_age_classes)
+    _, τ, f = simulate_boxcar(β, h_rec, ρ, nsteps, K_age_classes, Δt)
+    if !isfinite(τ) || any(x -> !isfinite(x), f)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    τ_valid = clamp(τ, 0.001, 0.999)
+    if !isfinite(τ_valid)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    f_safe  = safe_normalise(f, nsteps)
+
+    Turing.@addlogprob! binomlogpdf(N, τ_valid, K)  # AD-safe Binomial
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+    for i in 1:(M + K)
+        delta[i] ~ dph_bc
+    end
+
+    return (β=β, nb_r=nb_r, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+## Boxcar model for Scenario B (fixed $r$, $\ell_I + \ell_\text{constr}$)
+
+The infection-only Boxcar model mirrors the DPH Scenario B specification: $r$ is fixed to the PSIS-LOO-selected value and the GLCT transition matrix is replaced by infection-age cohort dynamics. This cross-checks that the two representations remain consistent when recovery data are absent.
+
+```{julia}
+#| echo: true
+#| output: false
+
+@model function boxcar_infonly(N::Int, M::Int, nsteps::Int, K::Int,
+                                th::Vector{Int},
+                                K_age_classes::Int, nb_r_max_prior::Int, Δt::Float64,
+                                nb_r_fixed::Int=0)
+    R₀      ~ Uniform(0.5, 5.0)
+    ρ       ~ Beta(1.0, N - 1)
+    nb_p    ~ Beta(1.0, 1.0)
+    if nb_r_fixed > 0
+        nb_r = nb_r_fixed
+    else
+        nb_r ~ DiscreteUniform(1, nb_r_max_prior)
+    end
+    β       = R₀ * nb_p / nb_r
+
+    if !(0 < nb_p ≤ 1 && β > 0)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+
+    h_rec = hazard_vector_negbin(nb_r, nb_p, K_age_classes)
+    _, τ, f = simulate_boxcar(β, h_rec, ρ, nsteps, K_age_classes, Δt)
+    if !isfinite(τ) || any(x -> !isfinite(x), f)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    τ_valid = clamp(τ, 0.001, 0.999)
+    if !isfinite(τ_valid)
+        Turing.@addlogprob! -Inf
+        return nothing
+    end
+    f_safe  = safe_normalise(f, nsteps)
+
+    Turing.@addlogprob! binomlogpdf(N, τ_valid, K)
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
+    end
+
+    return (β=β, R₀=R₀, nb_r=nb_r, nb_p=nb_p, ρ=ρ, τ=τ_valid)
+end
+```
+
+```{julia}
+#| echo: true
+#| output: false
+
+"""Infection-only log-likelihood: returns (lb, lm) = (Binomial final-size, Multinomial incidence); lm=0 when K==0."""
+function infonly_binom_multinom_loglik_dph_ref(
+        N::Int, nsteps::Int, K_obs::Int, th::Vector{Int},
+        R₀::Float64, nb_p::Float64, ρ::Float64, nb_r::Int, Δt::Float64)
+    β = R₀ * nb_p / nb_r
+    (0 < nb_p ≤ 1 && β > 0) || return (-Inf, -Inf)
+    dph = PhaseTypeDistributions.dph_negative_binomial(nb_r, nb_p)
+    result = simulate_discrete_glct(dph.S, dph.α, β, ρ, nsteps, Δt)
+    if !isfinite(result.τ) || any(!isfinite, result.f)
+        return (-Inf, -Inf)
+    end
+    τ_valid = clamp(result.τ, 0.001, 0.999)
+    isfinite(τ_valid) || return (-Inf, -Inf)
+    f_safe = safe_normalise(result.f, nsteps)
+    all(x -> isfinite(x) && !isnan(x), f_safe) || return (-Inf, -Inf)
+    abs(sum(f_safe) - 1) < 0.01 || return (-Inf, -Inf)
+    lb = binomlogpdf(N, τ_valid, K_obs)
+    isfinite(lb) || return (-Inf, -Inf)
+    K_obs == 0 && return (lb, 0.0)
+    lm = logpdf(Multinomial(K_obs, f_safe), th)
+    isfinite(lm) || return (-Inf, -Inf)
+    return (lb, lm)
+end
+
+"""Expand incidence histogram into individual infection times (1-based day indices)."""
+function expand_hist_to_times(th::AbstractVector{<:Integer})
+    K = sum(th)
+    ti = Vector{Int}(undef, K)
+    k = 0
+    for t in eachindex(th)
+        c = Int(th[t])
+        for _ in 1:c
+            k += 1
+            ti[k] = Int(t)
+        end
+    end
+    return ti
+end
+
+"""Summarise Pareto-k diagnostics from a `psis_loo` result."""
+function pareto_k_summary(loo_res)
+    ks = loo_res.pointwise(:pareto_k)
+    ks = collect(ks)
+    ks_f = filter(isfinite, ks)
+    isempty(ks_f) && return (k_max=NaN, k_mean=NaN, n=0, n_gt_0_5=0, n_gt_0_7=0, n_gt_1_0=0)
+    return (
+        k_max    = maximum(ks_f),
+        k_mean   = mean(ks_f),
+        n        = length(ks_f),
+        n_gt_0_5 = count(>(0.5), ks_f),
+        n_gt_0_7 = count(>(0.7), ks_f),
+        n_gt_1_0 = count(>(1.0), ks_f),
+    )
+end
+
+"""PSIS-LOO for infection-only data: K+1 pointwise terms (Binomial final-size + K Categorical infection times)."""
+function psis_loo_dph_infonly_fixedr_ref(chain, N::Int, nsteps::Int, K_obs::Int, th_obs::Vector{Int},
+                                         nb_r::Int, Δt::Float64)
+    R₀s = vec(chain[:R₀])
+    ps = vec(chain[:nb_p])
+    ρs = vec(chain[:ρ])
+    S = length(R₀s)
+    ti_obs = expand_hist_to_times(th_obs)
+    @assert length(ti_obs) == K_obs
+    ll = Array{Float64}(undef, K_obs + 1, S, 1)
+    for i in 1:S
+        R₀i = Float64(R₀s[i])
+        pi  = Float64(ps[i])
+        ρi  = Float64(ρs[i])
+
+        β = R₀i * pi / nb_r
+        (0 < pi ≤ 1 && β > 0) || begin
+            ll[:, i, 1] .= -Inf
+            continue
+        end
+        dph = PhaseTypeDistributions.dph_negative_binomial(nb_r, pi)
+        result = simulate_discrete_glct(dph.S, dph.α, β, ρi, nsteps, Δt)
+        if !isfinite(result.τ) || any(!isfinite, result.f)
+            ll[:, i, 1] .= -Inf
+            continue
+        end
+        τ_valid = clamp(result.τ, 0.001, 0.999)
+        isfinite(τ_valid) || begin
+            ll[:, i, 1] .= -Inf
+            continue
+        end
+        f_safe = safe_normalise(result.f, nsteps)
+        (all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01) || begin
+            ll[:, i, 1] .= -Inf
+            continue
+        end
+
+        lb = binomlogpdf(N, τ_valid, K_obs)
+        isfinite(lb) || begin
+            ll[:, i, 1] .= -Inf
+            continue
+        end
+        ll[1, i, 1] = lb
+
+        if K_obs == 0
+            # No infection-time terms when K=0.
+        else
+            for (j, t) in enumerate(ti_obs)
+                ft = f_safe[t]
+                ll[j + 1, i, 1] = (ft > 0 && isfinite(ft)) ? log(ft) : -Inf
+            end
+        end
+    end
+    if !any(isfinite, @view ll[:, :, 1])
+        return (elpd_loo=-Inf, se_total=Inf, p_eff_loo=NaN, loo_result=nothing)
+    end
+    loo_res = psis_loo(ll)
+    ksum = pareto_k_summary(loo_res)
+    return (
+        elpd_loo = loo_res.estimates(:cv_elpd, :total),
+        se_total = loo_res.estimates(:cv_elpd, :se_total),
+        p_eff_loo = loo_res.estimates(:p_eff, :total),
+        pareto_k = ksum,
+        loo_result = loo_res,
+    )
+end
+```
+
+# Data generation
+
+The synthetic dataset is generated from the nominal parameters defined above. The printed output reports the observed final size $K$, the empirical mean and coefficient of variation of the recovery intervals, and the Boxcar truncation length required to cover the worst-case prior tail under Scenario B.
+
+```{julia}
+#| echo: true
+#| output: true
+
+# N = susceptibles followed, M = pre-study infected
+N_sim  = 99
+M_sim  = 1
+ρ_sim  = ρ_true
+
+data_fwd = generate_discrete_glct_data(β_true, dph_nom.S, dph_nom.α, ρ_sim,
+                                        N_sim, M_sim, nsteps, Δt_nom)
+K_obs      = data_fwd[:K]
+th_obs     = data_fwd[:th]
+delta_obs  = data_fwd[:delta]
+τ_true_det = data_fwd[:τ]
+f_true_det = data_fwd[:f]
+
+nb_r_max_data = minimum(delta_obs)
+
+# K_age_B: Boxcar state-space length for Scenario B; worst-case prior is Geometric(1/30)
+# (r=1, mean=30 d), whose 99.9th percentile sets the required truncation.
+dph_worst_B = PhaseTypeDistributions.dph_negative_binomial(1, 1.0/30.0)
+K_age_B     = findfirst(k -> PhaseTypeDistributions.cdf(dph_worst_B, k) >= 0.999, 1:500)
+
+println("Simulator: β_true=$β_true per Δt, k=$nb_r, μ_ip=$μ_ip d (CT mean input), E[W]=$(round(nb_mean,digits=3)) d, R₀_imp=$(round(R0_imp, digits=3)), τ_det=$(round(τ_true_det, digits=3))")
+println("Observed: K=$K_obs / N=$N_sim  (attack rate $(round(K_obs/N_sim, digits=3)))")
+println("Recovery: mean=$(round(mean(delta_obs), digits=2)) d, " *
+        "min=$(minimum(delta_obs)), max=$(maximum(delta_obs)), " *
+        "CV=$(round(std(delta_obs)/mean(delta_obs), digits=3))")
+println("nb_r_max_data = $nb_r_max_data,  K_age = $K_age  (Scenario A),  K_age_B = $K_age_B  (Scenario B Boxcar)")
+```
+
+# MCMC inference
+
+All chains are initialised from data-informed starting points. With a stiff epidemic forward map and diffuse priors on $(\beta, \rho)$, random draws from the prior almost never produce dynamics consistent with the observed data, so leaving the sampler to find its own starting values leads to slow or failed warmup. For Scenarios A, C, and Boxcar A, initial values are derived from the observed line list: $r$ is set to the minimum observed recovery interval, $p$ is matched to the empirical mean infectious period, and $R_0$ is estimated from the observed attack rate via the final-size relation. Scenario B is the hardest case: without recovery intervals, the initial $p$ is set from a default mean-infectious-period scale, and $R_0$ is estimated from the observed final size alone. These starting values are a numerical feasibility aid; the posterior is defined entirely by the likelihood and priors, and convergence diagnostics at the end of this notebook confirm that all chains reach their target distributions.
+
+```{julia}
+#| echo: true
+#| output: false
+
+# 10_000 draws gives better convergence than 5_000 (especially Scenario B and Boxcar).
+n_samples  = 10_000
+nuts_adapt = 2_000
+nb_r_max   = 10        # upper bound for DiscreteUniform prior on nb_r (Scenarios A, Boxcar A)
+Δt_val     = Δt_nom  # must match simulator time step (here: 1 day per step)
+
+gibbs_A    = Gibbs(:nb_r => MH(),
+                   (:β, :ρ, :nb_p) => NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0))
+gibbs_C    = Gibbs(:nb_r => MH(),
+                   :nb_p => NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0))
+# Boxcar A: mirror gibbs_A — MH(nb_r) + one joint NUTS on (β, ρ, nb_p) for mixing comparable to DPH A
+gibbs_Abc  = Gibbs(:nb_r => MH(),
+                   (:β, :ρ, :nb_p) => NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0))
+nuts_B_fixed   = NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)
+nuts_Bbc_fixed = NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)
+nuts_sampl     = NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)  # Geo models
+# Shorter NUTS runs per r for PSIS-LOO; full `n_samples` only for LOO-selected r
+loo_grid_nuts_adapt = 500
+n_loo_per_r         = 2000
+nuts_B_loo          = NUTS(loo_grid_nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)
+# Infection-only init: default mean-IP scale for p ≈ r / m_guess (no δ̄ from recovery)
+m_ip_init_guess = 15.0
+
+τ_obs   = K_obs / N_sim
+R0_init = -log(1 - min(τ_obs, 0.999)) / max(τ_obs, 1e-6)
+println("Final-size heuristic (diagnostic only): τ_obs=$(round(τ_obs,digits=3)), R₀_init=$(round(R0_init,digits=2))")
+
+# Pass data-feasible starting point; prior draws almost never land in the typical set.
+r_init_gibbs = Int(clamp(minimum(delta_obs), 1, nb_r_max))
+delta_bar_g  = mean(delta_obs)
+R0_h_g       = clamp(-log(1 - min(τ_obs, 0.999)) / max(τ_obs, 1e-6), 0.5, 5.0)
+p_init_g     = clamp(r_init_gibbs / max(delta_bar_g, r_init_gibbs + 0.5), 0.05, 0.95)
+β_init_g     = clamp(R0_h_g * p_init_g / r_init_gibbs, 1e-4, β_prior_hi)
+ρ_init_g     = clamp(1.0 / N_sim, 1e-6, 1.0 - 1e-6)
+init_A_gibbs = (; β = β_init_g, ρ = ρ_init_g, nb_p = p_init_g, nb_r = r_init_gibbs)
+
+r_init_C = Int(clamp(minimum(delta_obs), 1, nb_r_max_data))
+p_init_C = clamp(r_init_C / max(mean(delta_obs), r_init_C + 0.5), 0.05, 0.95)
+init_C_gibbs = (; nb_r = r_init_C, nb_p = p_init_C)
+
+println("Sampling: Gibbs (A, C, Boxcar A) use line-list heuristics incl. recovery stats; " *
+        "Scenario B / PSIS-LOO use (K,N)-only R₀ init and p ≈ r / m_ip_init_guess.")
+```
+
+## Scenario A — Full DDSA (DPH)
+
+Scenario A uses all three data streams: $\ell_I + \ell_R + \ell_\text{constr}$. With full data, the phase count $r$ is identifiable from recovery intervals: the Gibbs/MH step for the discrete $r$ mixes well because the NegBin recovery likelihood discriminates sharply between different $r$ values.
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_A = dph_full(N_sim, M_sim, nsteps, K_obs, th_obs, delta_obs, nb_r_max, Δt_val)
+_ = sample(model_A, gibbs_A, 1; progress=false, initial_params=init_A_gibbs)
+t_A = @elapsed chain_A = sample(model_A, gibbs_A, n_samples;
+                                progress=false, initial_params=init_A_gibbs)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario A (Full DPH): $(round(t_A, digits=1)) s")
+```
+
+## PSIS-LOO selection of $r$ for Scenario B (infection-only DPH)
+
+For each candidate $r \in \{1, \ldots, 10\}$, a short NUTS chain (2000 draws, 500 warmup steps) is run under the infection-only model and the PSIS-LOO score is evaluated on the $K+1$ individual observations described in the Introduction. The output reports, for each $r$: the total $\text{elpd}_\text{LOO}$ and its Monte Carlo standard error, the effective number of parameters $p_\text{LOO}$, and Pareto-$\hat{k}$ diagnostics that assess importance-sampling reliability. The value of $r$ with the highest $\text{elpd}_\text{LOO}$ is carried forward to the full Scenario B chain. Because the incidence curve alone discriminates weakly between adjacent NegBin shapes, the selected $r$ need not equal the simulator’s Erlang stage count $k=4$; Scenario C provides the appropriate benchmark for shape recovery when recovery data are present.
+
+```{julia}
+#| echo: true
+#| output: false
+
+τ_B  = K_obs / N_sim
+R0_h = clamp(-log(1 - min(τ_B, 0.999)) / max(τ_B, 1e-6), 0.5, 5.0)
+ρ_B0 = 1.0 / N_sim
+
+elpd_loo_vals = fill(-Inf, nb_r_max)
+for r_try in 1:nb_r_max
+    p_try = clamp(r_try / max(m_ip_init_guess, r_try + 0.5), 0.05, 0.95)
+    init_try = (; R₀ = R0_h, nb_p = p_try, ρ = ρ_B0)
+    model_try = dph_infonly(N_sim, M_sim, nsteps, K_obs, th_obs, Δt_val, nb_r_max, r_try)
+    _ = sample(model_try, nuts_B_loo, 1; progress=false, initial_params=init_try)
+    ch_try = sample(model_try, nuts_B_loo, n_loo_per_r;
+                    progress=false, initial_params=init_try, source=false)
+    res = psis_loo_dph_infonly_fixedr_ref(ch_try, N_sim, nsteps, K_obs, th_obs, r_try, Δt_val)
+    elpd_loo_vals[r_try] = res.elpd_loo
+    k = res.pareto_k  
+end
+good = findall(isfinite, elpd_loo_vals)
+if isempty(good)
+    @warn "PSIS-LOO non-finite for all r; falling back to r_selected_B = 1."
+    r_selected_B = 1
+else
+    r_selected_B = good[argmax(elpd_loo_vals[good])]
+end
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Selected r = $r_selected_B  (Erlang k = $nb_r)  " *
+        "elpd_LOO = $(isfinite(elpd_loo_vals[r_selected_B]) ? round(elpd_loo_vals[r_selected_B], digits=2) : NaN)")
+```
+
+## Scenario B — Infection-only DDSA (DPH, $r$ fixed to PSIS-LOO choice)
+
+With $r$ fixed to the LOO-selected value, NUTS targets the three-dimensional posterior $(R_0, p, \rho)$ and mixes efficiently without the shape-identifiability problem that arises when $r$ is free.
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_B = dph_infonly(N_sim, M_sim, nsteps, K_obs, th_obs, Δt_val, nb_r_max, r_selected_B)
+# Feasible start: final-size R₀ from (K,N) only; p ≈ r / m_guess 
+p_h = clamp(r_selected_B / max(m_ip_init_guess, r_selected_B + 0.5), 0.05, 0.95)
+init_B = (; R₀ = R0_h, nb_p = p_h, ρ = ρ_B0)
+_ = sample(model_B, nuts_B_fixed, 1; progress=false, initial_params=init_B)
+t_B = @elapsed chain_B = sample(model_B, nuts_B_fixed, n_samples;
+                                 progress=false, initial_params=init_B)
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario B (DPH, r=$r_selected_B from PSIS-LOO): $(round(t_B, digits=1)) s")
+```
+
+## Scenario C — Recovery-only DDSA (DPH)
+
+Scenario C uses only the recovery likelihood $\ell_R$. With recovery data alone, $r$ is identifiable: the Gibbs/MH step explores $r \in \{1, \ldots, r_\text{max\_data}\}$ where $r_\text{max\_data} = \min(\delta_i)$ (the data-derived upper bound; NegBin total-trials support is $\{r, r+1, \ldots\}$).
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_C = dph_reconly(delta_obs, nb_r_max_data)
+_ = sample(model_C, gibbs_C, 1; progress=false, initial_params=init_C_gibbs)
+t_C = @elapsed chain_C = sample(model_C, gibbs_C, n_samples;
+                                progress=false, initial_params=init_C_gibbs)
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario C (Recovery-only DPH): $(round(t_C, digits=1)) s")
+r_selected_C = round(Int, median(vec(chain_C[:nb_r])))
+println("Scenario C: inferred nb_r = $r_selected_C  (Erlang k = $nb_r)")
+```
+
+## Scenario C — Recovery times only (Geometric)
+
+The geometric recovery-only model provides a single-parameter baseline for comparison with the DPH result under Scenario C.
+
+```{julia}
+#| echo: true
+#| output: false
+
+nuts_Cgeo  = NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)
+model_Cgeo = geo_reconly(delta_obs)
+_ = sample(model_Cgeo, nuts_Cgeo, 1; progress=false)
+t_Cgeo = @elapsed chain_Cgeo = sample(model_Cgeo, nuts_Cgeo, n_samples; progress=false)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario C (Recovery-only Geometric): $(round(t_Cgeo, digits=1)) s")
+```
+
+## Scenario A — Full (Geometric baseline)
+
+The geometric model is fitted under the full likelihood to assess the impact of exponential misspecification when all data streams are available.
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_Ageo = geo_full(N_sim, M_sim, nsteps, K_obs, th_obs, delta_obs, Δt_val)
+_ = sample(model_Ageo, nuts_sampl, 1; progress=false)
+t_Ageo = @elapsed chain_Ageo = sample(model_Ageo, nuts_sampl, n_samples; progress=false)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario A (Full Geometric): $(round(t_Ageo, digits=1)) s")
+```
+
+## Scenario B — Geometric baseline ($r \equiv 1$)
+
+The infection-only geometric model requires no shape selection step and serves as a misspecification baseline against which the NegBin-DPH Scenario B results can be compared.
+
+```{julia}
+#| echo: true
+#| output: false
+
+# Geo B: β–nb_p ridge (R₀ = β/nb_p) is poorly identified without recovery data.
+nuts_Bgeo  = NUTS(nuts_adapt, 0.8; max_depth=10, Δ_max=1000.0)
+model_Bgeo = geo_infonly(N_sim, M_sim, nsteps, K_obs, th_obs, Δt_val)
+_ = sample(model_Bgeo, nuts_Bgeo, 1; progress=false)
+t_Bgeo = @elapsed chain_Bgeo = sample(model_Bgeo, nuts_Bgeo, n_samples; progress=false)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario B (Geometric, r≡1, infection-only): $(round(t_Bgeo, digits=1)) s")
+```
+
+## Scenario A — Full (Boxcar)
+
+The full Boxcar model is fitted to cross-check the DPH result: both use the NegBin infectious period parameterisation and should produce equivalent posteriors on the same data.
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_Abc = boxcar_full(N_sim, M_sim, nsteps, K_obs, th_obs, delta_obs,
+                         K_age, nb_r_max, Δt_val)
+_ = sample(model_Abc, gibbs_Abc, 1; progress=false, initial_params=init_A_gibbs)
+t_Abc = @elapsed chain_Abc = sample(model_Abc, gibbs_Abc, n_samples;
+                                    progress=false, initial_params=init_A_gibbs)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario A (Full Boxcar): $(round(t_Abc, digits=1)) s")
+```
+
+## Scenario B — Boxcar with $r$ fixed to PSIS-LOO choice
+
+The infection-only Boxcar chain uses the same PSIS-LOO-selected $r$ as the DPH Scenario B chain, allowing a direct comparison between the two infectious-period representations under identical data availability.
+
+```{julia}
+#| echo: true
+#| output: false
+
+model_Bbc  = boxcar_infonly(N_sim, M_sim, nsteps, K_obs, th_obs,
+                             K_age_B, nb_r_max, Δt_val, r_selected_B)
+_ = sample(model_Bbc, nuts_Bbc_fixed, 1; progress=false, initial_params=init_B)
+t_Bbc = @elapsed chain_Bbc = sample(model_Bbc, nuts_Bbc_fixed, n_samples;
+                                     progress=false, initial_params=init_B)
+
+```
+```{julia}
+#| echo: false
+#| output: true
+
+println("Scenario B (Boxcar, r=$r_selected_B from PSIS-LOO): $(round(t_Bbc, digits=1)) s")
+```
+
+# Results
+
+## Posterior summaries
+
+The table below reports posterior means and 95% credible intervals for the transmission coefficient $\beta$, mean infectious period $r/p$, phase count $r$, and implied $R_0 = \beta \cdot r/p$ under all scenarios and infectious-period models. All estimates are compared to the simulator's discrete-time targets: $\beta_\text{true} = 0.5$ per step, $E[W] \approx 6.33$ d, and $R_0^\text{imp} = 3.164$.
+
+```{julia}
+#| echo: false
+#| output: true
+
+mean_ip_nb(chain) = vec(chain[:nb_r]) ./ vec(chain[:nb_p])
+
+println("=== SCENARIO A — Full data (DPH) ===")
+β_A   = mean(vec(chain_A[:β]))
+r_A   = round(Int, median(vec(chain_A[:nb_r])))
+p_Am  = mean(vec(chain_A[:nb_p]))
+ip_A  = mean(mean_ip_nb(chain_A))
+R0_A  = β_A * ip_A
+β_A_lo, β_A_hi  = quantile(vec(chain_A[:β]), [0.025, 0.975])
+ip_A_lo, ip_A_hi = quantile(mean_ip_nb(chain_A), [0.025, 0.975])
+println("  β = $(round(β_A,digits=3)) [$(round(β_A_lo,digits=3)), $(round(β_A_hi,digits=3))]  (true $β_true)")
+println("  mean_ip = r/p: $(round(ip_A,digits=2)) [$(round(ip_A_lo,digits=2)), $(round(ip_A_hi,digits=2))]  (true $nb_mean)")
+println("  nb_p = $(round(p_Am,digits=3))  (simulator is Erlang; NegBin p not one-to-one)")
+println("  nb_r = $r_A  (simulator Erlang k=$nb_r)")
+println("  R₀ = $(round(R0_A,digits=2))  (sim. R₀_imp $(round(R0_imp, digits=3)))")
+
+println("\n=== SCENARIO B — DPH, r from PSIS-LOO (infection-only) ===")
+R0_B_draws      = vec(chain_B[:R₀])
+mean_ip_B_draws = r_selected_B ./ vec(chain_B[:nb_p])
+# β is derived deterministically as R₀·nb_p/r; only (R₀, nb_p, ρ) are sampled.
+β_B_draws       = R0_B_draws .* vec(chain_B[:nb_p]) ./ r_selected_B
+r_B   = r_selected_B
+β_B   = mean(β_B_draws)
+ip_B  = mean(mean_ip_B_draws)
+R0_B  = mean(R0_B_draws)
+β_B_lo, β_B_hi   = quantile(β_B_draws,       [0.025, 0.975])
+ip_B_lo, ip_B_hi  = quantile(mean_ip_B_draws, [0.025, 0.975])
+R0_B_lo, R0_B_hi  = quantile(R0_B_draws,      [0.025, 0.975])
+println("  β = $(round(β_B,digits=3)) [$(round(β_B_lo,digits=3)), $(round(β_B_hi,digits=3))]  (true $β_true)")
+println("  mean_ip = r/p: $(round(ip_B,digits=2)) [$(round(ip_B_lo,digits=2)), $(round(ip_B_hi,digits=2))]  (true $nb_mean)")
+println("  nb_r mode = $r_B  (Erlang k=$nb_r)")
+println("  R₀ = $(round(R0_B,digits=2)) [$(round(R0_B_lo,digits=2)), $(round(R0_B_hi,digits=2))]  (sim. R₀_imp $(round(R0_imp, digits=3)))")
+
+println("\n=== SCENARIO C — Recovery times only (DPH) ===")
+r_C   = round(Int, median(vec(chain_C[:nb_r])))
+ip_C  = mean(mean_ip_nb(chain_C))
+p_Cm  = mean(vec(chain_C[:nb_p]))
+ip_C_lo, ip_C_hi = quantile(mean_ip_nb(chain_C), [0.025, 0.975])
+println("  mean_ip = r/p: $(round(ip_C,digits=2)) [$(round(ip_C_lo,digits=2)), $(round(ip_C_hi,digits=2))]  (true $nb_mean)")
+println("  nb_p = $(round(p_Cm,digits=3))")
+println("  nb_r = $r_C  (Erlang k=$nb_r)")
+println("  β: not estimated in this scenario")
+
+println("\n=== SCENARIO A — Full (Geometric misspecification) ===")
+β_Ag  = mean(vec(chain_Ageo[:β]))
+ip_Ag = mean(1 ./ vec(chain_Ageo[:nb_p]))
+R0_Ag = β_Ag * ip_Ag
+β_Ag_lo, β_Ag_hi = quantile(vec(chain_Ageo[:β]), [0.025, 0.975])
+println("  β = $(round(β_Ag,digits=3)) [$(round(β_Ag_lo,digits=3)), $(round(β_Ag_hi,digits=3))]  (DPH true $β_true)")
+println("  mean_ip = $(round(ip_Ag,digits=2))  (DPH true $nb_mean)")
+println("  R₀ = $(round(R0_Ag,digits=2))  (sim. R₀_imp $(round(R0_imp, digits=3)); geometric misspec.)")
+
+println("\n=== SCENARIO B — Geometric (r≡1, genuinely infection-only) ===")
+β_Bg  = mean(vec(chain_Bgeo[:β]))
+ip_Bg = mean(1 ./ vec(chain_Bgeo[:nb_p]))
+R0_Bg = β_Bg * ip_Bg
+β_Bg_lo, β_Bg_hi = quantile(vec(chain_Bgeo[:β]), [0.025, 0.975])
+println("  β = $(round(β_Bg,digits=3)) [$(round(β_Bg_lo,digits=3)), $(round(β_Bg_hi,digits=3))]  (DPH true $β_true)")
+println("  mean_ip = $(round(ip_Bg,digits=2))  (DPH true $nb_mean)")
+println("  R₀ = $(round(R0_Bg,digits=2))  (sim. R₀_imp $(round(R0_imp, digits=3)); geometric misspec.)")
+
+println("\n=== SCENARIO A — Full (Boxcar) ===")
+β_Abc  = mean(vec(chain_Abc[:β]))
+r_Abc  = round(Int, median(vec(chain_Abc[:nb_r])))
+ip_Abc = mean(mean_ip_nb(chain_Abc))
+R0_Abc = β_Abc * ip_Abc
+β_Abc_lo, β_Abc_hi   = quantile(vec(chain_Abc[:β]),     [0.025, 0.975])
+ip_Abc_lo, ip_Abc_hi = quantile(mean_ip_nb(chain_Abc), [0.025, 0.975])
+println("  β = $(round(β_Abc,digits=3)) [$(round(β_Abc_lo,digits=3)), $(round(β_Abc_hi,digits=3))]  (true $β_true)")
+println("  mean_ip = r/p: $(round(ip_Abc,digits=2)) [$(round(ip_Abc_lo,digits=2)), $(round(ip_Abc_hi,digits=2))]  (true $nb_mean)")
+println("  nb_r = $r_Abc  (Erlang k=$nb_r)")
+println("  R₀ = $(round(R0_Abc,digits=2))  (sim. R₀_imp $(round(R0_imp, digits=3)))")
+
+println("\n=== SCENARIO B — Boxcar, r=$r_selected_B from PSIS-LOO ===")
+R0_Bbc_draws      = vec(chain_Bbc[:R₀])
+mean_ip_Bbc_draws = r_selected_B ./ vec(chain_Bbc[:nb_p])
+β_Bbc_draws       = R0_Bbc_draws .* vec(chain_Bbc[:nb_p]) ./ r_selected_B
+r_Bbc  = r_selected_B
+β_Bbc  = mean(β_Bbc_draws)
+ip_Bbc = mean(mean_ip_Bbc_draws)
+R0_Bbc = mean(R0_Bbc_draws)
+β_Bbc_lo, β_Bbc_hi   = quantile(β_Bbc_draws,         [0.025, 0.975])
+ip_Bbc_lo, ip_Bbc_hi  = quantile(mean_ip_Bbc_draws,   [0.025, 0.975])
+R0_Bbc_lo, R0_Bbc_hi  = quantile(R0_Bbc_draws,        [0.025, 0.975])
+println("  β = $(round(β_Bbc,digits=3)) [$(round(β_Bbc_lo,digits=3)), $(round(β_Bbc_hi,digits=3))]  (true $β_true)")
+println("  mean_ip = r/p: $(round(ip_Bbc,digits=2)) [$(round(ip_Bbc_lo,digits=2)), $(round(ip_Bbc_hi,digits=2))]  (true $nb_mean)")
+println("  nb_r mode = $r_Bbc  (Erlang k=$nb_r)")
+println("  R₀ = $(round(R0_Bbc,digits=2)) [$(round(R0_Bbc_lo,digits=2)), $(round(R0_Bbc_hi,digits=2))]  (sim. R₀_imp $(round(R0_imp, digits=3)))")
+```
+
+## Posterior density comparison: transmission rate β
+
+Figure 1 compares the marginal posterior for $\beta$ across scenarios that include epidemic dynamics (Scenario C does not identify $\beta$). Under the full likelihood, all three infectious-period models concentrate near the true value. Under Geometric misspecification, the posterior shifts toward larger $\beta$ in both Scenarios A and B, because the model compensates for the wrong period shape by inflating the transmission coefficient and therefore $R_0$.
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-beta-scenarios
+
+p_beta = density(vec(chain_A[:β]), label="A: Full (DPH)",
+                  color=:royalblue, linewidth=2.5,
+                  xlabel="β (per Δt)", ylabel="Posterior density",
+                  title="Transmission coefficient β (one day per Δt)")
+density!(p_beta, β_B_draws, label="B: r=$r_selected_B (DPH, LOO)",
+          color=:royalblue, linewidth=2.5, linestyle=:dash)
+density!(p_beta, vec(chain_Ageo[:β]), label="A: Full (Geometric)",
+          color=:red3, linewidth=2.5, alpha=0.75)
+density!(p_beta, vec(chain_Bgeo[:β]), label="B: Geometric (r≡1)",
+          color=:red3, linewidth=2.5, linestyle=:dash, alpha=0.75)
+density!(p_beta, vec(chain_Abc[:β]), label="A: Full (Boxcar)",
+          color=:green4, linewidth=2.5, alpha=0.75)
+density!(p_beta, β_Bbc_draws, label="B: r=$r_selected_B (Boxcar, LOO)",
+          color=:green4, linewidth=2.5, linestyle=:dash, alpha=0.75)
+vline!(p_beta, [β_true], color=:black, linestyle=:dot, linewidth=2.5,
+        label="Simulator β (per Δt)")
+plot(p_beta, size=(800, 420), left_margin=4Plots.mm, bottom_margin=4Plots.mm)
+```
+
+## Posterior density comparison: mean infectious period
+
+Figure 2 compares the marginal posterior for mean infectious period across scenarios and infectious-period models. In Scenario A (full data), all three models concentrate near the simulator’s discrete mean, $E[W]\approx 6.33$ d, showing that the mean is well identified when recovery intervals are observed. Scenario B posteriors are wider, reflecting the lower information content of incidence data alone; the LOO-selected shape $r$ anchors the DPH and Boxcar fits, while the Geometric model adjusts through its single parameter $1/p$. Scenario C (recovery only) gives the sharpest posterior for the mean because it uses individual recovery durations directly, without epidemic-dynamics terms. Notably, the geometric model recovers the correct mean despite misspecifying the distributional shape, illustrating that the mean infectious period is identifiable from either epidemic timing or the mean recovery duration, whereas the distributional shape is identified only by the full spread of individual recovery intervals.
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-meanip-scenarios
+
+# Zoom x: geometric models can have very long right tails (1/nb_p). To avoid flattening all curves, we set x-limits using the non-geometric models, then overlay geometric densities on the same axis.
+ip_Av   = mean_ip_nb(chain_A)
+ip_Cv   = mean_ip_nb(chain_C)
+ip_Abcv = mean_ip_nb(chain_Abc)
+ip_geoA = 1 ./ vec(chain_Ageo[:nb_p])
+ip_geoB = 1 ./ vec(chain_Bgeo[:nb_p])
+ip_geoC = 1 ./ vec(chain_Cgeo[:nb_p])
+x_ip_lo, x_ip_hi = mean_ip_density_xlims(
+    ip_Av, mean_ip_B_draws, ip_Cv, ip_Abcv, mean_ip_Bbc_draws)
+
+p_ip = density(ip_Av, label="A: Full (DPH)",
+                color=:royalblue, linewidth=2.5,
+                xlabel="Mean infectious period (days)", ylabel="Posterior density",
+                title="Posterior mean infectious period (x zoom: pooled 3–97% across curves)", legend=:topleft)
+density!(p_ip, mean_ip_B_draws, label="B: r=$r_selected_B (DPH, LOO)",
+          color=:royalblue, linewidth=2.5, linestyle=:dash)
+density!(p_ip, ip_Cv, label="C: Recovery-only (DPH)",
+          color=:slateblue3, linewidth=2.5, linestyle=:dashdotdot)
+density!(p_ip, ip_geoA, label="A: Full (Geometric)",
+          color=:red3, linewidth=2.5, alpha=0.75)
+density!(p_ip, ip_geoB, label="B: Geometric (r≡1)",
+          color=:red3, linewidth=2.5, linestyle=:dash, alpha=0.75)
+density!(p_ip, ip_geoC, label="C: Recovery-only (Geometric)",
+          color=:red3, linewidth=2.5, linestyle=:dashdotdot, alpha=0.75)
+density!(p_ip, ip_Abcv, label="A: Full (Boxcar)",
+          color=:green4, linewidth=2.5, alpha=0.75)
+density!(p_ip, mean_ip_Bbc_draws, label="B: r=$r_selected_B (Boxcar, LOO)",
+          color=:green4, linewidth=2.5, linestyle=:dash, alpha=0.75)
+vline!(p_ip, [nb_mean], color=:black, linestyle=:dot, linewidth=2.5,
+        label="Simulator E[infectious period]")
+plot(p_ip; xlims=(x_ip_lo, x_ip_hi), size=(900, 480), left_margin=4Plots.mm, bottom_margin=4Plots.mm)
+```
+
+## Posterior for nb_r (phase count): identifiability across scenarios
+
+Figure 3 shows the marginal posterior of the phase count $r$ for scenarios where it is sampled. In Scenario A (full data), the posterior concentrates near the simulator’s Erlang stage count $k=4$, indicating that recovery intervals provide enough information to identify shape. Scenario C (recovery only) gives a similar posterior on $r$ via the Metropolis-Hastings update over admissible integers. In Scenario B, $r$ is fixed at the PSIS-LOO-selected value and therefore appears as a point mass, since infection-only likelihood terms cannot sharply distinguish shapes independently of the other epidemic parameters. The vertical dotted line marks the simulator value $k=4$ in each panel.
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-nbr-scenarios
+
+r_max_plot = 10
+function nbr_bar(chain, label, color)
+    vals   = vec(chain[:nb_r])
+    counts = [sum(vals .== r) for r in 1:r_max_plot]
+    bar(1:r_max_plot, counts ./ length(vals),
+        xlabel="Phase count r (parameter nb_r)", ylabel="Posterior proportion",
+        title=label, xticks=1:r_max_plot, legend=false,
+        color=color, alpha=0.7, ylim=(0, 1))
+    vline!([nb_r], color=:black, linestyle=:dot, linewidth=2.5)
+end
+# For infection-only models where nb_r is fixed (not sampled), show a point mass.
+function nbr_bar_fixed(r_fixed, label, color)
+    counts = zeros(r_max_plot)
+    if 1 ≤ r_fixed ≤ r_max_plot
+        counts[r_fixed] = 1.0
+    end
+    bar(1:r_max_plot, counts,
+        xlabel="Phase count r (parameter nb_r)", ylabel="Posterior proportion",
+        title="$label (fixed)", xticks=1:r_max_plot, legend=false,
+        color=color, alpha=0.7, ylim=(0, 1))
+    vline!([nb_r], color=:black, linestyle=:dot, linewidth=2.5)
+end
+
+pA_r   = nbr_bar(chain_A,   "A: Full (DPH)",             :royalblue)
+pB_r   = nbr_bar_fixed(r_selected_B,   "B: r=$r_selected_B (DPH, LOO)",  :royalblue)
+pC_r   = nbr_bar(chain_C,   "C: Recovery-only (DPH)",    :royalblue)
+pAbc_r = nbr_bar(chain_Abc, "A: Full (Boxcar)",           :green4)
+pBbc_r = nbr_bar_fixed(r_selected_B,   "B: r=$r_selected_B (Boxcar, LOO)", :green4)
+plot(pA_r, pB_r, pC_r, pAbc_r, pBbc_r,
+     layout=(2, 3), size=(1050, 620),
+     left_margin=4Plots.mm, bottom_margin=4Plots.mm)
+```
+
+## Combined summary figure
+
+Figure 4 provides a compact two-panel view: $\beta$ posteriors for Scenarios A and B, and mean infectious-period posteriors across all scenarios on shared axes. It combines the main patterns from Figures 1 and 2 in one place.
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-data-availability-summary
+
+# Two panels: β posteriors; implied mean IP (r/p). (Dedicated `nb_r` bar figure is above.)
+
+r1 = density(vec(chain_A[:β]), label="A-Full (DPH)", color=:royalblue, linewidth=2.5,
+              xlabel="β (per Δt)", ylabel="Posterior density", title="β (per Δt)")
+density!(r1, β_B_draws, label="B-InfOnly (DPH)", color=:royalblue,
+          linewidth=2.5, linestyle=:dash)
+density!(r1, vec(chain_Ageo[:β]), label="A-Full (Geo)", color=:red3,
+          linewidth=2.5, alpha=0.7)
+density!(r1, vec(chain_Bgeo[:β]), label="B-InfOnly (Geo)", color=:red3,
+          linewidth=2.5, linestyle=:dash, alpha=0.7)
+density!(r1, vec(chain_Abc[:β]), label="A-Full (Boxcar)", color=:green4,
+          linewidth=2.5, alpha=0.7)
+density!(r1, β_Bbc_draws, label="B-InfOnly (Boxcar)", color=:green4,
+          linewidth=2.5, linestyle=:dash, alpha=0.7)
+vline!(r1, [β_true], color=:black, linestyle=:dot, linewidth=2.5, label="Simulator β (per Δt)")
+
+# Geometric A/B: r≡1 ⇒ mean IP = 1/nb_p (same scale as r/p for NegBin-DPH).
+ip_sum_geoA = 1 ./ vec(chain_Ageo[:nb_p])
+ip_sum_geoB = 1 ./ vec(chain_Bgeo[:nb_p])
+ip_sum_geoC = 1 ./ vec(chain_Cgeo[:nb_p])
+# X zoom matches fig-meanip-scenarios (exclude Geo tails for axis selection).
+x_r2_lo, x_r2_hi = mean_ip_density_xlims(
+    mean_ip_nb(chain_A), mean_ip_B_draws, mean_ip_nb(chain_C),
+    mean_ip_nb(chain_Abc), mean_ip_Bbc_draws)
+r2 = density(mean_ip_nb(chain_A), label="A-Full (DPH)", color=:royalblue, linewidth=2.5,
+              xlabel="Mean infectious period (days)", ylabel="Posterior density",
+              title="E[infectious period] (days); x zoomed", legend=:topleft)
+density!(r2, mean_ip_B_draws, label="B-InfOnly (DPH)", color=:royalblue,
+          linewidth=2.5, linestyle=:dash)
+density!(r2, ip_sum_geoA, label="A-Full (Geo)", color=:red3,
+          linewidth=2.5, alpha=0.7)
+density!(r2, ip_sum_geoB, label="B-InfOnly (Geo)", color=:red3,
+          linewidth=2.5, linestyle=:dash, alpha=0.7)
+density!(r2, ip_sum_geoC, label="C-RecOnly (Geo)", color=:red3,
+          linewidth=2.5, linestyle=:dashdotdot, alpha=0.7)
+density!(r2, mean_ip_nb(chain_C), label="C-RecOnly (DPH)", color=:slateblue3,
+          linewidth=2.5, linestyle=:dashdotdot)
+density!(r2, mean_ip_nb(chain_Abc), label="A-Full (Boxcar)", color=:green4,
+          linewidth=2.5, alpha=0.7)
+density!(r2, mean_ip_Bbc_draws, label="B-InfOnly (Boxcar)", color=:green4,
+          linewidth=2.5, linestyle=:dash, alpha=0.7)
+vline!(r2, [nb_mean], color=:black, linestyle=:dot, linewidth=2.5, label="Simulator E[IP]")
+plot!(r2, xlims=(x_r2_lo, x_r2_hi))
+
+plot(r1, r2;
+     layout=(1, 2),
+     size=(1100, 440),
+     left_margin=5Plots.mm, bottom_margin=5Plots.mm,
+     plot_title="Data-availability scenarios: full vs partial line lists")
+```
+
+## Posterior predictive checks
+
+Figure 5 shows posterior predictive checks: incidence curves for Scenarios A and B, and recovery-interval histograms for Scenario C. For each posterior draw, we run the discrete epidemic forward map to obtain a predicted infection-time distribution, simulate new case counts, and overlay the posterior mean and 95% predictive interval on the observed histogram. For Scenario C, we evaluate the predicted recovery-interval distribution under inferred phase-type parameters and compare it directly with observed individual durations. Boxcar posterior predictives use the same infection-age state dimension as the corresponding fitted model to keep inference and prediction aligned.
+
+```{julia}
+#| echo: false
+#| output: true
+#| label: fig-ppc-scenarios
+
+function posterior_predictive_check(chain, N, nsteps; n_post=400, nb_r_default::Int=1)
+    n_chain = size(chain, 1)
+    idx     = round.(Int, range(1, n_chain, length=min(n_post, n_chain)))
+    means   = zeros(length(idx), nsteps)
+    draws   = zeros(length(idx), nsteps)
+    for (i, s) in enumerate(idx)
+        ρ_s    = chain[:ρ][s]
+        nb_r_s = :nb_r in names(chain) ? Int(chain[:nb_r][s]) : nb_r_default
+        nb_p_s = chain[:nb_p][s]
+        if :R₀ in names(chain)
+            R₀_s = chain[:R₀][s]
+            β_s  = R₀_s * nb_p_s / nb_r_s
+        else
+            β_s = chain[:β][s]
+        end
+        dph_s  = PhaseTypeDistributions.dph_negative_binomial(nb_r_s, nb_p_s)
+        r      = simulate_discrete_glct(dph_s.S, dph_s.α, β_s, ρ_s, nsteps, Δt_val)
+        f_s    = (r.f); τ_s = clamp(r.τ, 0.001, 0.999)
+        means[i, :] .= N .* τ_s .* max.(f_s, 0.0)
+        K_new = rand(Binomial(N, τ_s))
+        if K_new > 0 && all(isfinite, f_s)
+            f_safe = max.(f_s, 0.0); sf = sum(f_safe)
+            sf > 1e-10 && (f_safe ./= sf)
+            draws[i, :] .= rand(Multinomial(K_new, f_safe))
+        end
+    end
+    return means, draws
+end
+
+"""Incidence PPC using the Boxcar forward map (state dimension must match the inference model)."""
+function posterior_predictive_check_boxcar(chain, N, nsteps, K_age_classes; n_post=400, nb_r_default::Int=1)
+    n_chain = size(chain, 1)
+    idx     = round.(Int, range(1, n_chain, length=min(n_post, n_chain)))
+    means   = zeros(length(idx), nsteps)
+    draws   = zeros(length(idx), nsteps)
+    for (i, s) in enumerate(idx)
+        ρ_s    = chain[:ρ][s]
+        nb_r_s = :nb_r in names(chain) ? Int(chain[:nb_r][s]) : nb_r_default
+        nb_p_s = chain[:nb_p][s]
+        if :R₀ in names(chain)
+            R₀_s = chain[:R₀][s]
+            β_s  = R₀_s * nb_p_s / nb_r_s
+        else
+            β_s = chain[:β][s]
+        end
+        h_rec = hazard_vector_negbin(nb_r_s, nb_p_s, K_age_classes)
+        _, τ_raw, f_raw = simulate_boxcar(β_s, h_rec, ρ_s, nsteps, K_age_classes, Δt_val)
+        τ_s = clamp(τ_raw, 0.001, 0.999)
+        f_s = collect(f_raw)
+        (length(f_s) == nsteps && all(isfinite, f_s) && isfinite(τ_s)) || continue
+        f_s = max.(f_s, 0.0)
+        sf = sum(f_s)
+        sf > 1e-10 && (f_s ./= sf)
+        means[i, :] .= N .* τ_s .* f_s
+        K_new = rand(Binomial(N, τ_s))
+        if K_new > 0
+            draws[i, :] .= rand(Multinomial(K_new, f_s))
+        end
+    end
+    return means, draws
+end
+
+function fit_panel(means, draws, title_str; color=:royalblue)
+    tt   = 1:nsteps
+    pmn  = vec(mean(means, dims=1))
+    plo  = vec(mapslices(x -> quantile(x, 0.025), draws, dims=1))
+    phi  = vec(mapslices(x -> quantile(x, 0.975), draws, dims=1))
+    p = bar(tt, th_obs; label="Observed", color=:gray, alpha=0.6,
+            linewidth=0, bar_width=1.0,
+            xlabel="Day index t (Δt = 1 day)", ylabel="New infection count",
+            title=title_str, legend=:topright, grid=:y,
+            gridalpha=0.3, gridstyle=:dash)
+    plot!(p, collect(tt), plo; fillrange=phi, fillalpha=0.25, color=color,
+          linewidth=0, label="95% PPI")
+    plot!(p, collect(tt), pmn; color=color, linewidth=2.5, label="Post. mean")
+    return p
+end
+
+"""
+Posterior predictive check for recovery intervals (Scenario C).
+For each posterior draw compute the expected count at each interval value
+under the inferred NegBin(nb_r, nb_p) distribution and compare with the
+observed histogram.
+"""
+function posterior_predictive_recovery(chain, delta_obs; n_post=400, nb_r_default::Int=1)
+    n_chain  = size(chain, 1)
+    idx      = round.(Int, range(1, n_chain, length=min(n_post, n_chain)))
+    d_min    = minimum(delta_obs)
+    d_max    = maximum(delta_obs) + 5
+    bins     = d_min:d_max
+    n_obs    = length(delta_obs)
+    hist_obs = [sum(delta_obs .== k) for k in bins]
+    preds    = zeros(length(idx), length(bins))
+    for (i, s) in enumerate(idx)
+        nb_r_s = :nb_r in names(chain) ? Int(chain[:nb_r][s]) : nb_r_default
+        nb_p_s = chain[:nb_p][s]
+        (0 < nb_p_s ≤ 1) || continue
+        dph_s = PhaseTypeDistributions.dph_negative_binomial(nb_r_s, nb_p_s)
+        for (j, k) in enumerate(bins)
+            lp = logpdf(dph_s, k)
+            preds[i, j] = isfinite(lp) ? n_obs * exp(lp) : 0.0
+        end
+    end
+    return collect(bins), hist_obs, preds
+end
+
+function recovery_fit_panel(bins, hist_obs, preds, title_str; color=:royalblue)
+    pmn = vec(mean(preds, dims=1))
+    plo = vec(mapslices(x -> quantile(x, 0.025), preds, dims=1))
+    phi = vec(mapslices(x -> quantile(x, 0.975), preds, dims=1))
+    p = bar(bins, hist_obs; label="Observed", color=:gray, alpha=0.6,
+            linewidth=0, bar_width=1.0,
+            xlabel="Recovery interval δ (days)", ylabel="Individuals (count)",
+            title=title_str, legend=:topright, grid=:y,
+            gridalpha=0.3, gridstyle=:dash)
+    plot!(p, collect(bins), plo; fillrange=phi, fillalpha=0.25, color=color,
+          linewidth=0, label="95% PPI")
+    plot!(p, collect(bins), pmn; color=color, linewidth=2.5, label="Post. mean")
+    return p
+end
+
+# --- Incidence PPCs (scenarios A and B: epidemic dynamics present) ---
+means_A,   draws_A   = posterior_predictive_check(chain_A,    N_sim, nsteps)
+means_B,   draws_B   = posterior_predictive_check(chain_B,    N_sim, nsteps;
+                                                   nb_r_default=r_selected_B)
+means_Ag,  draws_Ag  = posterior_predictive_check(chain_Ageo, N_sim, nsteps)
+means_Bg,  draws_Bg  = posterior_predictive_check(chain_Bgeo, N_sim, nsteps)
+means_Abc, draws_Abc = posterior_predictive_check_boxcar(chain_Abc, N_sim, nsteps, K_age)
+means_Bbc, draws_Bbc = posterior_predictive_check_boxcar(chain_Bbc, N_sim, nsteps, K_age_B;
+                                                          nb_r_default=r_selected_B)
+
+# --- Recovery interval PPCs (Scenario C: recovery times only) ---
+# C-Boxcar ≡ C-DPH for recovery intervals (same NegBin model)
+bins_C,  hist_C,  preds_C  = posterior_predictive_recovery(chain_C,    delta_obs)
+bins_Cg, hist_Cg, preds_Cg = posterior_predictive_recovery(chain_Cgeo, delta_obs)
+
+pA_ppc   = fit_panel(means_A,   draws_A,   "A: Full (DPH)";                  color=:royalblue)
+pB_ppc   = fit_panel(means_B,   draws_B,   "B: r=$r_selected_B (DPH, LOO)";       color=:royalblue)
+pAg_ppc  = fit_panel(means_Ag,  draws_Ag,  "A: Full (Geometric)";            color=:red3)
+pBg_ppc  = fit_panel(means_Bg,  draws_Bg,  "B: Geometric (r≡1)";            color=:red3)
+pAbc_ppc = fit_panel(means_Abc, draws_Abc, "A: Full (Boxcar)";               color=:green4)
+pBbc_ppc = fit_panel(means_Bbc, draws_Bbc, "B: r=$r_selected_B (Boxcar, LOO)";    color=:green4)
+pC_ppc   = recovery_fit_panel(bins_C,  hist_C,  preds_C,
+                               "C: Recovery-only (DPH/Boxcar)";  color=:royalblue)
+pCg_ppc  = recovery_fit_panel(bins_Cg, hist_Cg, preds_Cg,
+                               "C: Recovery-only (Geometric)";   color=:red3)
+
+# Layout: rows = scenario (A / B / C), columns = model (DPH / Geometric / Boxcar).
+# Bottom-right slot is empty: C-Boxcar ≡ C-DPH (identical recovery model).
+plot(pA_ppc,   pAg_ppc,  pAbc_ppc,
+     pB_ppc,   pBg_ppc,  pBbc_ppc,
+     pC_ppc,   pCg_ppc,
+     layout=(3, 3), size=(1200, 960),
+     left_margin=4Plots.mm, bottom_margin=4Plots.mm)
+```
+
+## Convergence 
+
+The diagnostics below are computed from a single Markov chain. The $\hat{R}$ statistic uses the standard split-chain construction (first half versus second half), so values near 1 are expected but constitute a weaker check than multiple independent chains. The ESS reported is the bulk ESS for the parameter with the lowest ESS among non-constant parameters, which identifies the bottleneck for Monte Carlo accuracy. Tags such as `[nb_r=4 (const)]` indicate that a parameter was excluded from the ESS scan because its stored trace has numerically zero variance (for example, a Metropolis-Hastings step on $r$ concentrating entirely on one integer). The recovery-only DPH scenario (C) often yields the lowest ESS on $p$, because $r$ is effectively fixed by the data while $p$ can be weakly identified or correlated with the discrete-$r$ prior support; the Geometric variant can appear better simply because it has one fewer discrete parameter. 
+
+```{julia}
+#| echo: false
+#| output: true
+
+for (label, chain) in [("A-Full-DPH",      chain_A),
+                        ("B-LOO-DPH",       chain_B),
+                        ("C-RecOnly-DPH",   chain_C),
+                        ("A-Full-Geo",      chain_Ageo),
+                        ("B-Geo (r≡1)",     chain_Bgeo),
+                        ("C-RecOnly-Geo",   chain_Cgeo),
+                        ("A-Full-Boxcar",   chain_Abc),
+                        ("B-LOO-Boxcar",    chain_Bbc)]
+    all_params  = names(chain, :parameters)
+    # Constant chains (e.g. nb_r ≡ 5 from Gibbs/MH) can cause ESS to loop infinitely. Filter them out before summarystats.
+    non_const   = filter(p -> std(vec(Array(chain[p]))) > 1e-10, all_params)
+    const_parms = setdiff(all_params, non_const)
+
+    const_note = ""
+    if !isempty(const_parms)
+        parts = map(const_parms) do p
+            mode_val = round(Int, median(vec(Array(chain[p]))))
+            "$p=$mode_val (const)"
+        end
+        const_note = " [" * join(parts, ", ") * "]"
+    end
+
+    if isempty(non_const)
+        println("$label: all parameters constant$const_note")
+        continue
+    end
+
+    sub_chain   = chain[:, non_const, :]
+    s           = DataFrame(summarystats(sub_chain))
+    pnames      = s.parameters
+    rhat_finite = filter(isfinite, collect(skipmissing(s.rhat)))
+    rhat_max    = isempty(rhat_finite) ? NaN : maximum(rhat_finite)
+    ess_col     = s.ess_bulk
+    valid       = findall(x -> !ismissing(x) && !isnan(x), ess_col)
+    if isempty(valid)
+        println("$label: max R̂ = $(round(rhat_max, digits=4)), ESS = N/A$const_note")
+        continue
+    end
+    ess_min, i = findmin(collect(skipmissing(ess_col[valid])))
+    worst_par  = pnames[valid[i]]
+    println("$label: max R̂ = $(round(rhat_max, digits=4)), " *
+            "ESS = $(round(Int, ess_min)) ($worst_par)$const_note")
+end
+```
+
+# Discussion
+
+The analysis of these scenarios demonstrates how different data types influence each model's ability to estimate epidemic parameters.
+
+- _Scenario A (Full Data)_: When both epidemic timing and individual recovery times are known, all parameters are clearly identified. The timing of cases defines the transmission rate $\beta$, while the variation in recovery times defines the duration and shape of the infectious period.
+- _Scenario B (Incidence Only):_ This scenario relies on the total number of cases and the daily incidence histogram. Without recovery data, we use a cross-validation method (PSIS-LOO) to select the most likely shape for the infectious period. Because several different shapes can produce similar-looking daily case counts, this method is less precise. A simpler Geometric model is also tested here, which assumes a constant probability of recovery each day.
+- _Scenario C (Recovery Only):_ This focuses on how long individuals stay sick, using records like hospital stays. While this data identifies the infectious period, it tells us nothing about how fast the disease spreads.
+
+We compared two mathematical methods for tracking infections: the DPH method and the Boxcar method. Both are mathematically equivalent and produce the same results. The DPH method is more computationally efficient (using fewer states), while the Boxcar method is more intuitive but requires more processing power and longer warmup periods during estimation to reach accurate results.
+
+Using the wrong model for the infectious period (e.g., a Geometric model) often goes unnoticed if we only look at daily case counts. At the aggregate level, the epidemic curve is driven by the product $R_0 \approx \beta r/p$. Thus, a misspecified model compensates by adjusting $\beta$ and $p$ to maintain the same $R_0$, generating a misleadingly good fit to case counts However, the mismatch becomes apparent when examining individual recovery times. A Geometric model assumes most people recover very quickly, whereas the simulated data show a humped distribution in which most people recover after a few days.

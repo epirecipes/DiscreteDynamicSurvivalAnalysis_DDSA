@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.27">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="author" content="Sandra Montes (@slmontes) and Simon Frost (@sdwfrost)">
+<meta name="dcterms.date" content="2026-04-13">
+
+<title>Inference of an SIR difference equation model using dynamic survival analysis and Turing.jl - Wave 3 of the Ebola outbreak data</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="DSA_turing_SIRmap_W3_files/libs/clipboard/clipboard.min.js"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/popper.min.js"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="DSA_turing_SIRmap_W3_files/libs/quarto-html/anchor.min.js"></script>
+<link href="DSA_turing_SIRmap_W3_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="DSA_turing_SIRmap_W3_files/libs/quarto-html/quarto-syntax-highlighting-ed96de9b727972fe78a7b5d16c58bf87.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="DSA_turing_SIRmap_W3_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="DSA_turing_SIRmap_W3_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="DSA_turing_SIRmap_W3_files/libs/bootstrap/bootstrap-c62ef0501ae2f3adb684d0ab58cf61b7.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+<div class="quarto-alternate-formats"><h2>Other Formats</h2><ul><li><a href="../DSA_turing_SIRmap_W3.pdf"><i class="bi bi-file-pdf"></i>PDF</a></li><li><a href="DSA_turing_SIRmap_W3.docx"><i class="bi bi-file-word"></i>MS Word</a></li><li><a href="DSA_turing_SIRmap_W3.md"><i class="bi bi-file-code"></i>Github (GFM)</a></li></ul></div></div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Inference of an SIR difference equation model using dynamic survival analysis and Turing.jl - Wave 3 of the Ebola outbreak data</h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    <div>
+    <div class="quarto-title-meta-heading">Author</div>
+    <div class="quarto-title-meta-contents">
+             <p>Sandra Montes <code>(@slmontes)</code> and Simon Frost <code>(@sdwfrost)</code> </p>
+          </div>
+  </div>
+    
+    <div>
+    <div class="quarto-title-meta-heading">Published</div>
+    <div class="quarto-title-meta-contents">
+      <p class="date">April 13, 2026</p>
+    </div>
+  </div>
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="introduction" class="level2">
+<h2 class="anchored" data-anchor-id="introduction">Introduction</h2>
+<p>The third and final wave of the 2018–2020 DRC Ebola epidemic shifted southward to Beni, Kalunguta, and Mandima. This notebook analyses Wave 3 up to 12 September 2019, using 1,069 records with all completeness categories retained.</p>
+<p>Of the 1,069 Wave 3 records, 747 are complete, 321 have known onset but no recorded hospitalisation, and 1 has hospitalisation but no known onset. Each group contributes a different likelihood component:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Group</th>
+<th>Count</th>
+<th>Likelihood contribution</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Complete (<code>e1=1, e2=1</code>)</td>
+<td>747</td>
+<td>Multinomial (onset) + Geometric (recovery) + Binomial</td>
+</tr>
+<tr class="even">
+<td>Onset-only (<code>e1=1, e2=0</code>)</td>
+<td>321</td>
+<td>Multinomial (onset) + Binomial only</td>
+</tr>
+<tr class="odd">
+<td>Hosp-only (<code>e1=0, e2=1</code>)</td>
+<td>1</td>
+<td>Convolution over unknown onset + Binomial</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="libraries" class="level2">
+<h2 class="anchored" data-anchor-id="libraries">Libraries</h2>
+<div id="2" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb1"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Turing</span>              <span class="co"># For probabilistic programming</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Distributions</span>       <span class="co"># For probability distributions</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">SpecialFunctions</span>    <span class="co"># For lgamma (log gamma function)</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Random</span>              <span class="co"># For random number generation</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Plots</span>               <span class="co"># For plotting</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">StatsPlots</span>          <span class="co"># For advanced plotting</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">MCMCChains</span>          <span class="co"># For handling MCMC output</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Dates</span>               <span class="co"># For now()</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">CSV</span>                 <span class="co"># For reading CSV files</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">DataFrames</span>          <span class="co"># For data manipulation</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Statistics</span>          <span class="co"># For statistical functions</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>We set a random seed for reproducibility.</p>
+<div id="4" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="bu">Random</span>.<span class="fu">seed!</span>(<span class="fl">1234</span>);</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="utility-functions" class="level2">
+<h2 class="anchored" data-anchor-id="utility-functions">Utility functions</h2>
+<p>This function converts a rate, <code>r</code> over a unit time interval to a proportion.</p>
+<div id="6" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="pp">@inline</span> <span class="kw">function</span> <span class="fu">rate_to_proportion</span>(r, t<span class="op">=</span><span class="fl">1.0</span>)</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> r <span class="op">&lt;</span> <span class="fl">0</span> <span class="op">||</span> <span class="fu">isnan</span>(r)</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="fl">0.0</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elseif</span> <span class="fu">isinf</span>(r)</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="fl">1.0</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> <span class="fl">1</span> <span class="op">-</span> <span class="fu">exp</span>(<span class="op">-</span>r <span class="op">*</span> t)</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="fu">isnan</span>(result) ? <span class="fl">0.0</span> <span class="op">:</span> <span class="fu">max</span>(<span class="fu">min</span>(result, <span class="fl">1.0</span>), <span class="fl">0.0</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>This function evaluates <code>log(exp(a) + exp(b))</code> by rescaling around <code>max(a,b)</code>, avoiding underflow when summing many very small probabilities expressed on the log scale.</p>
+<div id="8" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb4"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">logaddexp</span>(a<span class="op">::</span><span class="dt">Real</span>, b<span class="op">::</span><span class="dt">Real</span>)</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    m <span class="op">=</span> <span class="fu">max</span>(a, b)</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    <span class="fu">isfinite</span>(m) ? m <span class="op">+</span> <span class="fu">log</span>(<span class="fu">exp</span>(a <span class="op">-</span> m) <span class="op">+</span> <span class="fu">exp</span>(b <span class="op">-</span> m)) <span class="op">:</span> m</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>This function generates a vector of counts from a vector of times and the total number of timesteps in a simulation.</p>
+<div id="10" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">time_counts</span>(times<span class="op">::</span><span class="dt">AbstractVector{&lt;:Integer}</span>, nsteps<span class="op">::</span><span class="dt">Integer</span>)</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    counts <span class="op">=</span> <span class="fu">zeros</span>(<span class="dt">Int</span>, nsteps)</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="pp">@inbounds</span> <span class="cf">for</span> t <span class="kw">in</span> times</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>        <span class="fl">1</span> <span class="op">≤</span> t <span class="op">≤</span> nsteps <span class="op">&amp;&amp;</span> (counts[t] <span class="op">+=</span> <span class="fl">1</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> counts</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="transitions" class="level2">
+<h2 class="anchored" data-anchor-id="transitions">Transitions</h2>
+<p>We start by defining the deterministic SIR model in discrete time using a system of difference equations. The model tracks the proportion of susceptible (S), infected (I), cumulative infections (C), and new infections per time step (Y).</p>
+<div id="12" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">sir_map!</span>(du, u, p, t)</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    (S, I, C, Y) <span class="op">=</span> u</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    (β, γ) <span class="op">=</span> p</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    infection <span class="op">=</span> <span class="fu">rate_to_proportion</span>(β<span class="op">*</span>I)<span class="op">*</span>S     <span class="co"># New infections</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    recovery <span class="op">=</span> <span class="fu">rate_to_proportion</span>(γ)<span class="op">*</span>I        <span class="co"># New recoveries</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    <span class="pp">@inbounds</span> <span class="cf">begin</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>        du[<span class="fl">1</span>] <span class="op">=</span> S <span class="op">-</span> infection                 <span class="co"># Update susceptibles</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>        du[<span class="fl">2</span>] <span class="op">=</span> I <span class="op">+</span> infection<span class="op">-</span>recovery        <span class="co"># Update infected</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>        du[<span class="fl">3</span>] <span class="op">=</span> C <span class="op">+</span> infection                 <span class="co"># Update cumulative infections</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>        du[<span class="fl">4</span>] <span class="op">=</span> infection                     <span class="co"># Store new infections</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="cn">nothing</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>This function solves a map with the above function signature.</p>
+<div id="14" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">solve_map</span>(f, u0, nsteps, p)</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Pre-allocate array with correct type</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    sol <span class="op">=</span> <span class="fu">similar</span>(u0, <span class="fu">length</span>(u0), nsteps <span class="op">+</span> <span class="fl">1</span>)</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Initialize the first column with the initial state</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    sol[<span class="op">:</span>, <span class="fl">1</span>] <span class="op">=</span> u0</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Iterate over the time steps</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    <span class="pp">@inbounds</span> <span class="cf">for</span> t <span class="kw">in</span> <span class="fl">2</span><span class="op">:</span>nsteps<span class="op">+</span><span class="fl">1</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>        u <span class="op">=</span> <span class="pp">@view</span> sol[<span class="op">:</span>, t<span class="op">-</span><span class="fl">1</span>] <span class="co"># Get the current state</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>        du <span class="op">=</span> <span class="pp">@view</span> sol[<span class="op">:</span>, t] <span class="co"># Prepare the next state</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>        <span class="fu">f</span>(du, u, p, t)       <span class="co"># Call the function to update du</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> sol</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>Alternatively, we could use the <code>DifferentialEquations.jl</code> ecosystem (via defining a <code>DiscreteSystem</code> and solving using <code>SimpleFunctionMap</code> from <code>SimpleDiffEq.jl</code>) to simulate the model, although this incurs an overhead in computational cost, in addition to introducing another dependency.</p>
+<p>This function simulates the SIR model and returns the solution, the final epidemic size (τ) and the probability distribution of infection times (f).</p>
+<div id="16" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">function</span> <span class="fu">simulate</span>(β, γ, ρ, nsteps)</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    tspan <span class="op">=</span> (<span class="fl">0</span>, nsteps)</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Preserve type by using zero/one of the promoted type</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    T <span class="op">=</span> <span class="fu">promote_type</span>(<span class="fu">typeof</span>(β), <span class="fu">typeof</span>(γ), <span class="fu">typeof</span>(ρ))</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    zero_T <span class="op">=</span> <span class="fu">zero</span>(T)</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    one_T <span class="op">=</span> <span class="fu">one</span>(T)</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>    u0 <span class="op">=</span> [one_T <span class="op">-</span> ρ, ρ, zero_T, zero_T] <span class="co"># Initial conditions: S, I, C, Y</span></span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>    p <span class="op">=</span> [β, γ]</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>    sol <span class="op">=</span> <span class="fu">solve_map</span>(sir_map!, u0, nsteps, p)</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>    τ <span class="op">=</span> sol[<span class="fl">3</span>,<span class="kw">end</span>]      <span class="co"># Final size (total infected)</span></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>    f <span class="op">=</span> <span class="fu">Vector</span><span class="dt">{eltype(sol)}</span>(sol[<span class="fl">4</span>,<span class="fl">2</span><span class="op">:</span><span class="kw">end</span>])  <span class="co"># Copy to preserve type</span></span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>    f <span class="op">=</span> <span class="fu">abs</span>.(f)         <span class="co"># Ensure non-negative values</span></span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Handle edge cases for probability vector </span></span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> τ <span class="op">&lt;=</span> <span class="fl">0</span> <span class="op">||</span> <span class="fu">any</span>(<span class="fu">isnan</span>.(f)) <span class="op">||</span> <span class="fu">any</span>(<span class="fu">isinf</span>.(f))</span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true" tabindex="-1"></a>        f <span class="op">=</span> <span class="fu">fill</span>(<span class="fu">one</span>(<span class="fu">eltype</span>(f))<span class="op">/</span>nsteps, nsteps)</span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span></span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true" tabindex="-1"></a>        f <span class="op">=</span> f<span class="op">/</span>τ         <span class="co"># Normalise frequencies to sum to 1</span></span>
+<span id="cb8-18"><a href="#cb8-18" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb8-19"><a href="#cb8-19" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> sol, τ, f</span>
+<span id="cb8-20"><a href="#cb8-20" aria-hidden="true" tabindex="-1"></a><span class="kw">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="data-loading" class="level2">
+<h2 class="anchored" data-anchor-id="data-loading">Data loading</h2>
+<p>We load the Ebola outbreak data from <code>EVD_Wave3.csv</code>.</p>
+<div id="18" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb9"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Load the data</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>df_all <span class="op">=</span> CSV.<span class="fu">read</span>(<span class="st">"EVD_Wave3.csv"</span>, DataFrame);</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Split into three groups by data availability</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>df_complete   <span class="op">=</span> df_all[(df_all.event1 <span class="op">.==</span> <span class="fl">1</span>) <span class="op">.&amp;</span> (df_all.event2 <span class="op">.==</span> <span class="fl">1</span>), <span class="op">:</span>]</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>df_onset_only <span class="op">=</span> df_all[(df_all.event1 <span class="op">.==</span> <span class="fl">1</span>) <span class="op">.&amp;</span> (df_all.event2 <span class="op">.==</span> <span class="fl">0</span>), <span class="op">:</span>]</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>df_hosp_only  <span class="op">=</span> df_all[(df_all.event1 <span class="op">.==</span> <span class="fl">0</span>) <span class="op">.&amp;</span> (df_all.event2 <span class="op">.==</span> <span class="fl">1</span>), <span class="op">:</span>]</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a><span class="co"># Total observed infections for the Binomial final-size term</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>K_total <span class="op">=</span> <span class="fu">nrow</span>(df_all)</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a><span class="co"># Use all records with a known onset time: complete + onset_only</span></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>onset_times_all <span class="op">=</span> <span class="fu">vcat</span>(df_complete.onset, df_onset_only.onset)</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>nsteps <span class="op">=</span> <span class="fu">Int</span>(<span class="fu">ceil</span>(<span class="fu">maximum</span>(onset_times_all))) <span class="op">+</span> <span class="fl">1</span></span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>ti_onset <span class="op">=</span> <span class="fu">max</span>.(<span class="fl">1</span>, <span class="fu">min</span>.(<span class="fu">Int</span>.(<span class="fu">round</span>.(onset_times_all)) <span class="op">.+</span> <span class="fl">1</span>, nsteps))</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>K_onset  <span class="op">=</span> <span class="fu">length</span>(ti_onset)   <span class="co"># used in Multinomial</span></span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a>th_onset <span class="op">=</span> <span class="fu">time_counts</span>(ti_onset, nsteps)</span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a><span class="co"># Complete records only: hosp - onset </span></span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>raw_delta_complete <span class="op">=</span> df_complete.hosp <span class="op">.-</span> df_complete.onset</span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a><span class="pp">@assert</span> <span class="fu">all</span>(raw_delta_complete <span class="op">.&gt;=</span> <span class="fl">0</span>) <span class="st">"Found complete records with hosp &lt; onset."</span></span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a>same_day_complete <span class="op">=</span> <span class="fu">count</span>(<span class="fu">&lt;</span>(<span class="fl">1</span>), raw_delta_complete)</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a>delta_complete <span class="op">=</span> <span class="fu">max</span>.(<span class="fl">1</span>, <span class="fu">Int</span>.(<span class="fu">round</span>.(raw_delta_complete)))</span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a><span class="co"># The "onset" column for e1=0 records contains the hospitalisation time.</span></span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a>T_hosp_only <span class="op">=</span> <span class="fu">max</span>.(<span class="fl">1</span>, <span class="fu">min</span>.(<span class="fu">Int</span>.(<span class="fu">round</span>.(df_hosp_only.hosp)) <span class="op">.+</span> <span class="fl">1</span>, nsteps))</span>
+<span id="cb9-27"><a href="#cb9-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-28"><a href="#cb9-28" aria-hidden="true" tabindex="-1"></a><span class="co"># Minimum N: at least as many susceptibles as total observed infections</span></span>
+<span id="cb9-29"><a href="#cb9-29" aria-hidden="true" tabindex="-1"></a>N_min <span class="op">=</span> K_total</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>Summary of the loaded data:</p>
+<div id="20" class="cell" data-execution_count="1">
+<div class="cell-output cell-output-stdout">
+<pre><code>Wave 3 data summary:
+  Total records (K_total, Binomial):       1069
+  With known onset (K_onset, Multinomial): 1068
+    of which complete (e1=1, e2=1):        747
+    of which onset-only (e1=1, e2=0):      321
+  Hosp-only (e1=0, e2=1, convolution):     1
+  nsteps: 109
+  Same-day/sub-day complete intervals (&lt;1 day): 101
+  Recovery intervals range: 1–20 days</code></pre>
+</div>
+</div>
+</section>
+<section id="turing-model" class="level2">
+<h2 class="anchored" data-anchor-id="turing-model">Turing Model</h2>
+<p>The Turing.jl probabilistic model for the model, specifies priors, simulates the difference equations, and defines the likelihood for observed data by defining the distributions of (a) the total infected (b) the distribution of infection times, (c) the distribution of recovery times and (d) the convolution over unknown onset time for recovery-only records. We place uniform priors on the parameters, as upper and lower bounds are typically easy for the user to define. Here, we take advantage of the discrete nature of the data, by fitting a histogram of the infection times using a multinomial distribution, rather than a series of categorical distributions.</p>
+<div id="22" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb11"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="pp">@model</span> <span class="kw">function</span> <span class="fu">dsa_ebola_allrecords</span>(nsteps<span class="op">::</span><span class="dt">Int</span>,</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>                                     K_total<span class="op">::</span><span class="dt">Int</span>,</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>                                     K_onset<span class="op">::</span><span class="dt">Int</span>,</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>                                     th_onset<span class="op">::</span><span class="dt">Vector{Int}</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>                                     delta_complete<span class="op">::</span><span class="dt">Vector{Int}</span>,</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>                                     T_hosp_only<span class="op">::</span><span class="dt">Vector{Int}</span>,</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>                                     N_min<span class="op">::</span><span class="dt">Int</span>)</span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Priors for model parameters</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>    β <span class="op">~</span> <span class="fu">Uniform</span>(<span class="fl">0.01</span>, <span class="fl">1.0</span>)   <span class="co"># Transmission rate </span></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>    γ <span class="op">~</span> <span class="fu">Uniform</span>(<span class="fl">0.01</span>, <span class="fl">1.0</span>)   <span class="co"># Recovery rate </span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>    ρ <span class="op">~</span> <span class="fu">Beta</span>(<span class="fl">1.0</span>, <span class="fl">500.0</span>)      <span class="co"># Initial infected proportion </span></span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a>    N_float <span class="op">~</span> <span class="fu">Uniform</span>(<span class="fu">Float64</span>(N_min), <span class="fu">Float64</span>(N_min <span class="op">+</span> <span class="fl">20000</span>))</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Convert to integer for Binomial: use floor and clamp to ensure N &gt;= N_min</span></span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a>    <span class="co"># The conversion is done after sampling, so NUTS can sample continuously</span></span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true" tabindex="-1"></a>    N <span class="op">=</span> <span class="fu">Int</span>(<span class="fu">floor</span>(<span class="fu">max</span>(<span class="fu">Float64</span>(N_min), N_float)))</span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Simulate deterministic model </span></span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true" tabindex="-1"></a>    _, τ, f <span class="op">=</span> <span class="fu">simulate</span>(β, γ, ρ, nsteps)</span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Ensure τ is valid for binomial distribution</span></span>
+<span id="cb11-23"><a href="#cb11-23" aria-hidden="true" tabindex="-1"></a>    τ_valid <span class="op">=</span> <span class="fu">clamp</span>(τ, <span class="fl">1e-6</span>, <span class="fl">1.0</span> <span class="op">-</span> <span class="fl">1e-6</span>)</span>
+<span id="cb11-24"><a href="#cb11-24" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb11-25"><a href="#cb11-25" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Ensure f is valid for multinomial distribution</span></span>
+<span id="cb11-26"><a href="#cb11-26" aria-hidden="true" tabindex="-1"></a>    f_valid <span class="op">=</span> <span class="fu">max</span>.(f, <span class="fl">1e-10</span>)           <span class="co"># Add small positive value to avoid zeros</span></span>
+<span id="cb11-27"><a href="#cb11-27" aria-hidden="true" tabindex="-1"></a>    f_valid <span class="op">=</span> f_valid <span class="op">/</span> <span class="fu">sum</span>(f_valid)   <span class="co"># Normalise</span></span>
+<span id="cb11-28"><a href="#cb11-28" aria-hidden="true" tabindex="-1"></a>    log_f_valid <span class="op">=</span> <span class="fu">log</span>.(f_valid)</span>
+<span id="cb11-29"><a href="#cb11-29" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb11-30"><a href="#cb11-30" aria-hidden="true" tabindex="-1"></a>    <span class="co"># (1) Binomial final-size: all K_total infections</span></span>
+<span id="cb11-31"><a href="#cb11-31" aria-hidden="true" tabindex="-1"></a>    K_total <span class="op">~</span> <span class="fu">Binomial</span>(N, τ_valid)</span>
+<span id="cb11-32"><a href="#cb11-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-33"><a href="#cb11-33" aria-hidden="true" tabindex="-1"></a>    <span class="co"># (2) Multinomial onset histogram: records with known onset (K_onset)</span></span>
+<span id="cb11-34"><a href="#cb11-34" aria-hidden="true" tabindex="-1"></a>    th_onset <span class="op">~</span> <span class="fu">Multinomial</span>(K_onset, f_valid)</span>
+<span id="cb11-35"><a href="#cb11-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-36"><a href="#cb11-36" aria-hidden="true" tabindex="-1"></a>    <span class="co"># (3) Geometric recovery intervals: complete records only.</span></span>
+<span id="cb11-37"><a href="#cb11-37" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Build a 1-indexed geometric by shifting Julia's 0-indexed Geometric(p)</span></span>
+<span id="cb11-38"><a href="#cb11-38" aria-hidden="true" tabindex="-1"></a>    <span class="co"># so the support matches recovery intervals in days (δ = 1,2,...).</span></span>
+<span id="cb11-39"><a href="#cb11-39" aria-hidden="true" tabindex="-1"></a>    ϵ  <span class="op">=</span> <span class="fl">1e-8</span></span>
+<span id="cb11-40"><a href="#cb11-40" aria-hidden="true" tabindex="-1"></a>    pγ <span class="op">=</span> <span class="fu">clamp</span>(<span class="fu">rate_to_proportion</span>(γ), ϵ, <span class="fl">1</span> <span class="op">-</span> ϵ)</span>
+<span id="cb11-41"><a href="#cb11-41" aria-hidden="true" tabindex="-1"></a>    G1 <span class="op">=</span> <span class="fu">LocationScale</span>(<span class="fl">1</span>, <span class="fl">1</span>, <span class="fu">Geometric</span>(pγ))</span>
+<span id="cb11-42"><a href="#cb11-42" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> <span class="fu">eachindex</span>(delta_complete)</span>
+<span id="cb11-43"><a href="#cb11-43" aria-hidden="true" tabindex="-1"></a>        delta_complete[i] <span class="op">~</span> G1</span>
+<span id="cb11-44"><a href="#cb11-44" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb11-45"><a href="#cb11-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-46"><a href="#cb11-46" aria-hidden="true" tabindex="-1"></a>    <span class="co"># (4) Convolution for hosp-only records: marginalise over unknown onset u.</span></span>
+<span id="cb11-47"><a href="#cb11-47" aria-hidden="true" tabindex="-1"></a>    <span class="co">#     L_i = Σ_{u=1}^{T_rem-1} f[u] · P(W = T_rem - u), using the same</span></span>
+<span id="cb11-48"><a href="#cb11-48" aria-hidden="true" tabindex="-1"></a>    <span class="co">#     1-indexed geometric distribution G1 as above.</span></span>
+<span id="cb11-49"><a href="#cb11-49" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> T_rem <span class="kw">in</span> T_hosp_only</span>
+<span id="cb11-50"><a href="#cb11-50" aria-hidden="true" tabindex="-1"></a>        u_max <span class="op">=</span> <span class="fu">min</span>(T_rem <span class="op">-</span> <span class="fl">1</span>, nsteps)</span>
+<span id="cb11-51"><a href="#cb11-51" aria-hidden="true" tabindex="-1"></a>        log_terms <span class="op">=</span> (log_f_valid[u] <span class="op">+</span> <span class="fu">logpdf</span>(G1, T_rem <span class="op">-</span> u) <span class="cf">for</span> u <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>u_max)</span>
+<span id="cb11-52"><a href="#cb11-52" aria-hidden="true" tabindex="-1"></a>        Turing.<span class="pp">@addlogprob</span>! <span class="fu">foldl</span>(logaddexp, log_terms; init <span class="op">=</span> <span class="op">-</span><span class="cn">Inf</span>)</span>
+<span id="cb11-53"><a href="#cb11-53" aria-hidden="true" tabindex="-1"></a>    <span class="cf">end</span></span>
+<span id="cb11-54"><a href="#cb11-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-55"><a href="#cb11-55" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> (β<span class="op">=</span>β, γ<span class="op">=</span>γ, ρ<span class="op">=</span>ρ, N<span class="op">=</span>N_float)</span>
+<span id="cb11-56"><a href="#cb11-56" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span>;</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="inference" class="level2">
+<h2 class="anchored" data-anchor-id="inference">Inference</h2>
+<p>We now perform inference using the Turing model. We start by setting the number of samples to be used in the sampler and instantiating the model.</p>
+<div id="24" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb12"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>n_samples <span class="op">=</span> <span class="fl">5000</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>model <span class="op">=</span> <span class="fu">dsa_ebola_allrecords</span>(nsteps, K_total, K_onset,</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>                              th_onset, delta_complete, T_hosp_only, N_min);</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>Next, we run inference using the No U-Turn Sampler (NUTS).</p>
+<div id="26" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Warmup</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>_ <span class="op">=</span> <span class="fu">sample</span>(model, <span class="fu">NUTS</span>(), <span class="fl">1</span>)</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Run sampler on 4 chains</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="pp">@time</span> chain <span class="op">=</span> <span class="fu">sample</span>(model,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>                     <span class="fu">NUTS</span>(<span class="fl">500</span>, <span class="fl">0.65</span>; max_depth<span class="op">=</span><span class="fl">12</span>, Δ_max<span class="op">=</span><span class="fl">1000.0</span>, init_ϵ<span class="op">=</span><span class="fl">0.2</span>),</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>                     <span class="fu">MCMCThreads</span>(),</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>                     n_samples,</span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>                     <span class="fl">4</span>);</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>We can pass different samplers from <code>Turing.jl</code> (e.g.&nbsp;<code>MH</code>, <code>SGLD</code>, <code>HMC</code>), external samplers (e.g.&nbsp;<code>DynamicHMC.NUTS</code>, <code>AdvancedMH.RWMH</code>) via wrapping with <code>external_sampler</code>, and can also pass the model to other packages, e.g.&nbsp;<a href="https://github.com/mlcolab/Pathfinder.jl"><code>Pathfinder.jl</code></a>.</p>
+</section>
+<section id="results-analysis" class="level2">
+<h2 class="anchored" data-anchor-id="results-analysis">Results Analysis</h2>
+<p>Once we have run the sampler, we can get a summary of the parameter estimates, along with the expected number of samples.</p>
+<div id="28" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb14"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="fu">describe</span>(chain)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<div class="ansi-escaped-output">
+<pre>Chains MCMC chain (5000×18×4 Array{Float64, 3}):
+
+Iterations        = 501:1:5500
+Number of chains  = 4
+Samples per chain = 5000
+Wall duration     = 790.84 seconds
+Compute duration  = 2528.78 seconds
+parameters        = β, γ, ρ, N_float
+internals         = n_steps, is_accept, acceptance_rate, log_density, hamiltonian_energy, hamiltonian_energy_error, max_hamiltonian_energy_error, tree_depth, numerical_error, step_size, nom_step_size, lp, logprior, loglikelihood
+
+Summary Statistics
+
+ <span class="ansi-bold"> parameters </span> <span class="ansi-bold">      mean </span> <span class="ansi-bold">      std </span> <span class="ansi-bold">    mcse </span> <span class="ansi-bold">  ess_bulk </span> <span class="ansi-bold">  ess_tail </span> <span class="ansi-bold">    rha</span> ⋯
+ <span class="ansi-bright-black-fg">     Symbol </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">  Float64 </span> <span class="ansi-bright-black-fg"> Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg"> Float6</span> ⋯
+
+           β      0.2395     0.0079    0.0002   2705.8411   4158.3743    1.001 ⋯
+           γ      0.2420     0.0087    0.0002   2555.0536   4296.3077    1.000 ⋯
+           ρ      0.0068     0.0006    0.0000   2932.7657   4941.3867    1.000 ⋯
+     N_float   5260.1903   684.7645   11.5295   3892.4985   4204.0838    1.000 ⋯
+
+<span class="ansi-cyan-fg">                                                               2 columns omitted</span>
+
+Quantiles
+
+ <span class="ansi-bold"> parameters </span> <span class="ansi-bold">      2.5% </span> <span class="ansi-bold">     25.0% </span> <span class="ansi-bold">     50.0% </span> <span class="ansi-bold">     75.0% </span> <span class="ansi-bold">     97.5% </span>
+ <span class="ansi-bright-black-fg">     Symbol </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span> <span class="ansi-bright-black-fg">   Float64 </span>
+
+           β      0.2243      0.2341      0.2394      0.2447      0.2550
+           γ      0.2253      0.2361      0.2418      0.2478      0.2592
+           ρ      0.0057      0.0064      0.0068      0.0071      0.0079
+     N_float   4179.5339   4775.3131   5176.8534   5646.7463   6833.2286
+
+</pre>
+</div>
+</div>
+</div>
+<p>NUTS diagnostics:</p>
+<div id="30" class="cell" data-execution_count="1">
+<div class="cell-output cell-output-stdout">
+<pre><code>NUTS internals available: [:n_steps, :is_accept, :acceptance_rate, :log_density, :hamiltonian_energy, :hamiltonian_energy_error, :max_hamiltonian_energy_error, :tree_depth, :numerical_error, :step_size, :nom_step_size, :lp, :logprior, :loglikelihood]
+Divergent transitions: 0 / 20000
+Max tree depth reached: 12.0
+Step size ε (median [min, max]): 0.00117 [0.00102, 0.00717]</code></pre>
+</div>
+</div>
+<p>We can also plot posterior distributions for each parameter.</p>
+<div id="32" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb16"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>β_mean <span class="op">=</span> <span class="fu">mean</span>(chain[<span class="op">:</span>β])</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>γ_mean <span class="op">=</span> <span class="fu">mean</span>(chain[<span class="op">:</span>γ])</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>ρ_mean <span class="op">=</span> <span class="fu">mean</span>(chain[<span class="op">:</span>ρ])</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>N_mean <span class="op">=</span> <span class="fu">mean</span>(chain[<span class="op">:</span>N_float])</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Vossler et al. (2022) Wave 1 reference values</span></span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>p1 <span class="op">=</span> <span class="fu">histogram</span>(chain[<span class="op">:</span>β], label<span class="op">=</span><span class="st">""</span>, title<span class="op">=</span><span class="st">"β"</span>, density<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p1, [<span class="fl">0.235</span>], label<span class="op">=</span><span class="st">"Ref (Vossler et al.)"</span>, color<span class="op">=:</span>black, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p1, [β_mean], label<span class="op">=</span><span class="st">"Posterior mean"</span>, color<span class="op">=:</span>red, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-11"><a href="#cb16-11" aria-hidden="true" tabindex="-1"></a>p2 <span class="op">=</span> <span class="fu">histogram</span>(chain[<span class="op">:</span>γ], label<span class="op">=</span><span class="st">""</span>, title<span class="op">=</span><span class="st">"γ"</span>, density<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb16-12"><a href="#cb16-12" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p2, [<span class="fl">0.241</span>], label<span class="op">=</span><span class="st">"Ref -log(1- γ)(Vossler et al.)"</span>, color<span class="op">=:</span>black, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-13"><a href="#cb16-13" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p2, [γ_mean], label<span class="op">=</span><span class="st">"Posterior mean"</span>, color<span class="op">=:</span>red, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-14"><a href="#cb16-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-15"><a href="#cb16-15" aria-hidden="true" tabindex="-1"></a>p3 <span class="op">=</span> <span class="fu">histogram</span>(chain[<span class="op">:</span>ρ], label<span class="op">=</span><span class="st">""</span>, title<span class="op">=</span><span class="st">"ρ"</span>, density<span class="op">=</span><span class="cn">true</span>)</span>
+<span id="cb16-16"><a href="#cb16-16" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p3, [<span class="fl">0.0067</span>], label<span class="op">=</span><span class="st">"Ref (Vossler et al.)"</span>, color<span class="op">=:</span>black, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-17"><a href="#cb16-17" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p3, [ρ_mean], label<span class="op">=</span><span class="st">"Posterior mean"</span>, color<span class="op">=:</span>red, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-18"><a href="#cb16-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-19"><a href="#cb16-19" aria-hidden="true" tabindex="-1"></a><span class="co"># N is wave-specific</span></span>
+<span id="cb16-20"><a href="#cb16-20" aria-hidden="true" tabindex="-1"></a>p4 <span class="op">=</span> <span class="fu">histogram</span>(chain[<span class="op">:</span>N_float], label<span class="op">=</span><span class="st">""</span>, title<span class="op">=</span><span class="st">"N (Wave 3)"</span>, density<span class="op">=</span><span class="cn">true</span>, bins<span class="op">=</span><span class="fl">50</span>)</span>
+<span id="cb16-21"><a href="#cb16-21" aria-hidden="true" tabindex="-1"></a><span class="fu">vline!</span>(p4, [N_mean], label<span class="op">=</span><span class="st">"Posterior mean"</span>, color<span class="op">=:</span>red, linestyle<span class="op">=:</span>dash, linewidth<span class="op">=</span><span class="fl">2</span>)</span>
+<span id="cb16-22"><a href="#cb16-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-23"><a href="#cb16-23" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(p1, p2, p3, p4, layout<span class="op">=</span>(<span class="fl">2</span>,<span class="fl">2</span>), plot_title<span class="op">=</span><span class="st">"Posterior Distributions — Wave 3"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-display" data-execution_count="1">
+<div>
+<figure class="figure">
+<p><img src="DSA_turing_SIRmap_W3_files/figure-html/cell-17-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+<p>Plot trace plots for MCMC diagnostics.</p>
+<div id="34" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(chain, plot_title<span class="op">=</span><span class="st">"Trace Plots — Wave 3"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-display" data-execution_count="1">
+<div>
+<figure class="figure">
+<p><img src="DSA_turing_SIRmap_W3_files/figure-html/cell-18-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="parameter-estimates" class="level2">
+<h2 class="anchored" data-anchor-id="parameter-estimates">Parameter Estimates</h2>
+<p>We summarise the posterior estimates for the model parameters.</p>
+<div id="36" class="cell" data-execution_count="1">
+<div class="cell-output cell-output-stdout">
+<pre><code>Parameter Estimates — Wave 3 (all records, posterior means with 95% CI):
+β:      0.239 [0.224, 0.255]  (Vossler: 0.235)
+γ:      0.242 [0.225, 0.259]  (Vossler: 0.214)
+pγ=1-e⁻ᵞ: 0.215
+ρ:      0.0068 [0.0057, 0.0079]  (Vossler: 0.0067)
+N:      5260.0 [4180.0, 6833.0]
+I₀=ρ·N:  35.4 [28.3, 43.6]  (implied initial infected)
+R₀=β/pγ: 1.114  (Vossler β/γ: 1.098)
+mean IP=1/pγ: 4.65 days  (Vossler 1/γ: 4.7 d)</code></pre>
+</div>
+</div>
+</section>
+<section id="recovery-interval-fit-check" class="level2">
+<h2 class="anchored" data-anchor-id="recovery-interval-fit-check">Recovery interval fit check</h2>
+<div id="38" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Empirical δ histogram vs fitted Geometric(pγ_post) PMF (1-indexed)</span></span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>δ <span class="op">=</span> delta_complete</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>kmax <span class="op">=</span> <span class="fu">maximum</span>(δ)</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>ks <span class="op">=</span> <span class="fl">1</span><span class="op">:</span>kmax</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>pmf <span class="op">=</span> <span class="fu">pdf</span>.(<span class="fu">LocationScale</span>(<span class="fl">1</span>, <span class="fl">1</span>, <span class="fu">Geometric</span>(pγ_post)), ks)</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>pδ <span class="op">=</span> <span class="fu">histogram</span>(δ;</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>    normalize<span class="op">=</span><span class="cn">true</span>,</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>    bins<span class="op">=</span><span class="fl">1</span><span class="op">:</span>kmax,</span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a>    alpha<span class="op">=</span><span class="fl">0.5</span>,</span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a>    label<span class="op">=</span><span class="st">"Empirical δ (complete records)"</span>,</span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a>    xlabel<span class="op">=</span><span class="st">"δ (days)"</span>,</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a>    ylabel<span class="op">=</span><span class="st">"Probability"</span>,</span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Wave 3: Recovery interval check"</span></span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a><span class="fu">plot!</span>(pδ, ks, pmf; linewidth<span class="op">=</span><span class="fl">2</span>, color<span class="op">=:</span>red, label<span class="op">=</span><span class="st">"Fitted Geometric(pγ)"</span>)</span>
+<span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a>pδ</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-display" data-execution_count="1">
+<div>
+<figure class="figure">
+<p><img src="DSA_turing_SIRmap_W3_files/figure-html/cell-20-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="epidemic-curve" class="level2">
+<h2 class="anchored" data-anchor-id="epidemic-curve">Epidemic curve</h2>
+<div id="40" class="cell" data-execution_count="1">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb20"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>sol, τ, f <span class="op">=</span> <span class="fu">simulate</span>(β_post, γ_post, ρ_post, nsteps)</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>n_samples_ci <span class="op">=</span> <span class="fu">min</span>(<span class="fl">500</span>, <span class="fu">length</span>(chain[<span class="op">:</span>β]))</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>sample_idx   <span class="op">=</span> <span class="fu">rand</span>(<span class="fl">1</span><span class="op">:</span><span class="fu">length</span>(chain[<span class="op">:</span>β]), n_samples_ci)</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>f_samples    <span class="op">=</span> <span class="fu">Matrix</span><span class="dt">{Float64}</span>(<span class="cn">undef</span>, nsteps, n_samples_ci)</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (idx, i) <span class="kw">in</span> <span class="fu">enumerate</span>(sample_idx)</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>    _, _, f_i <span class="op">=</span> <span class="fu">simulate</span>(chain[<span class="op">:</span>β][i], chain[<span class="op">:</span>γ][i], chain[<span class="op">:</span>ρ][i], nsteps)</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true" tabindex="-1"></a>    f_samples[<span class="op">:</span>, idx] <span class="op">=</span> f_i</span>
+<span id="cb20-9"><a href="#cb20-9" aria-hidden="true" tabindex="-1"></a><span class="cf">end</span></span>
+<span id="cb20-10"><a href="#cb20-10" aria-hidden="true" tabindex="-1"></a>f_lower <span class="op">=</span> [<span class="fu">quantile</span>(f_samples[t, <span class="op">:</span>], <span class="fl">0.025</span>) for t <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>nsteps]</span>
+<span id="cb20-11"><a href="#cb20-11" aria-hidden="true" tabindex="-1"></a>f_upper <span class="op">=</span> [<span class="fu">quantile</span>(f_samples[t, <span class="op">:</span>], <span class="fl">0.975</span>) for t <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span>nsteps]</span>
+<span id="cb20-12"><a href="#cb20-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-13"><a href="#cb20-13" aria-hidden="true" tabindex="-1"></a>p1 <span class="op">=</span> <span class="fu">plot</span>(<span class="fl">1</span><span class="op">:</span>nsteps, th_onset <span class="op">./</span> K_onset,</span>
+<span id="cb20-14"><a href="#cb20-14" aria-hidden="true" tabindex="-1"></a>          label<span class="op">=</span><span class="st">"Observed (onset-known)"</span>,</span>
+<span id="cb20-15"><a href="#cb20-15" aria-hidden="true" tabindex="-1"></a>          title<span class="op">=</span><span class="st">"Wave 3 (all records): Onset times"</span>,</span>
+<span id="cb20-16"><a href="#cb20-16" aria-hidden="true" tabindex="-1"></a>          xlabel<span class="op">=</span><span class="st">"Time step"</span>, ylabel<span class="op">=</span><span class="st">"Proportion of infections"</span>,</span>
+<span id="cb20-17"><a href="#cb20-17" aria-hidden="true" tabindex="-1"></a>          linewidth<span class="op">=</span><span class="fl">2</span>, marker<span class="op">=:</span>circle, markersize<span class="op">=</span><span class="fl">3</span>)</span>
+<span id="cb20-18"><a href="#cb20-18" aria-hidden="true" tabindex="-1"></a><span class="fu">plot!</span>(p1, <span class="fl">1</span><span class="op">:</span>nsteps, f_lower,</span>
+<span id="cb20-19"><a href="#cb20-19" aria-hidden="true" tabindex="-1"></a>      fillrange<span class="op">=</span>f_upper, fillalpha<span class="op">=</span><span class="fl">0.3</span>, fillcolor<span class="op">=:</span>orange,</span>
+<span id="cb20-20"><a href="#cb20-20" aria-hidden="true" tabindex="-1"></a>      linecolor<span class="op">=:</span>orange, label<span class="op">=</span><span class="st">"95% CI"</span>, linewidth<span class="op">=</span><span class="fl">0</span>)</span>
+<span id="cb20-21"><a href="#cb20-21" aria-hidden="true" tabindex="-1"></a><span class="fu">plot!</span>(p1, <span class="fl">1</span><span class="op">:</span>nsteps, f, label<span class="op">=</span><span class="st">"Posterior mean"</span>, linewidth<span class="op">=</span><span class="fl">3</span>, color<span class="op">=:</span>red)</span>
+<span id="cb20-22"><a href="#cb20-22" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(p1, size<span class="op">=</span>(<span class="fl">800</span>, <span class="fl">500</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-display" data-execution_count="1">
+<div>
+<figure class="figure">
+<p><img src="DSA_turing_SIRmap_W3_files/figure-html/cell-21-output-1.svg" class="img-fluid figure-img"></p>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="discussion" class="level2">
+<h2 class="anchored" data-anchor-id="discussion">Discussion</h2>
+<p>Across all three waves, DDSA reproduces the key epidemiological trend identified by Vossler et al.&nbsp;(2022). The framework stays stable under different data-completeness profiles across waves (Wave 1: 24.5% onset-only, Wave 2: 35.5%, Wave 3: 30.0%), because each record type is mapped to an explicit likelihood contribution rather than handled by ad hoc imputation. Together, these findings indicate that for outbreak line lists reported in daily calendar time, DDSA offers an observation-consistent alternative to continuous-time implementations.</p>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

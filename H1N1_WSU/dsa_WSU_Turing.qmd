@@ -1,0 +1,512 @@
+---
+title: "Inference using dynamic survival analysis and Turing.jl: WSU Data"
+author: "Simon Frost (@sdwfrost), Sandra Montes (@slmontes)"
+date: 2025-08-15
+format:
+    pdf:
+        mainfont: "Arial"
+        sansfont: "Open Sans"
+        monofont: "Andale Mono"
+        code-overflow: wrap
+    docx: default
+    html:
+        code-overflow: wrap
+    gfm: default
+julia:
+    exeflags: ["--project=@."]
+    env: ["JULIA_NUM_THREADS=10"]
+execute:
+    cache: false
+---
+
+## Introduction
+
+In this example, we use a discrete-time SIR model and Turing.jl to infer key epidemiological parameters from a dataset. This dataset originates from a study conducted on the H1N1 outbreak at Washington State University (WSU) in 2009, recording the number of daily cases over a period of 105 days. The dataset was obtained from [KhudaBukhsh et al. (2019)](https://github.com/cbskust/SDS.Epidemic/tree/master). They modified the original raw data, that only included daily counts of new infections, by reconstructing individual infection times from the daily case counts and generating individual recovery times from a Gamma distribution fitted to the recovery process. The resulting dataset (WSU.csv) contains individual-level infection times (first column) and recovery times (second column) for 2,276 cases, including 10 individuals whose recovery occurred after the 105-day observation window and are therefore treated as right-censored.  
+
+## Libraries
+
+```{julia}
+#| echo: true
+#| output: false
+
+using Distributions
+using Turing
+using StatsPlots
+using Plots
+using Statistics
+using Random
+using CSV
+using DataFrames
+using MCMCDiagnosticTools
+```
+
+Set random seed for reproducibility
+```{julia}
+#| echo: true
+#| output: false
+seed = 1234
+Random.seed!(seed)
+```
+
+## Utility functions
+
+```{julia}
+#| echo: true
+#| output: false
+
+"""
+Convert a rate to a probability over time t.
+"""
+@inline function rate_to_proportion(r, t=1.0)
+    if r < 0 || isnan(r)
+        return 0.0
+    elseif isinf(r)
+        return 1.0
+    else
+        result = 1 - exp(-r * t)
+        return isnan(result) ? 0.0 : max(min(result, 1.0), 0.0)
+    end
+end
+
+"""
+Generate a vector of counts from a vector of times and the total number of timesteps.
+"""
+function time_counts(times::AbstractVector{<:Integer}, nsteps::Integer)
+    counts = zeros(Int, nsteps)
+    @inbounds for t in times
+        1 ≤ t ≤ nsteps && (counts[t] += 1)
+    end
+    return counts
+end
+
+"""
+Prepare real data from DataFrame for analysis.
+"""
+function prep_sds(df::DataFrame, Tmax)
+    ti     = Float64[]
+    delta  = Float64[]
+    cens   = Bool[]
+    for r in eachrow(df)
+        t_inf, t_rec = r[1], r[2]
+        t_inf ≥ Tmax && continue                # infection after cut-off - ignore
+        
+        # Calculate recovery interval
+        recovery_interval = t_rec - t_inf
+        
+        # Only include valid recovery intervals 
+        if recovery_interval > 0
+            push!(ti, t_inf)
+            if t_rec < Tmax                        # full recovery observed
+                push!(delta, recovery_interval)
+                push!(cens, false)
+            else                                   # right-censored
+                push!(delta, Tmax - t_inf)
+                push!(cens, true)
+            end
+        end
+    end
+    return ti, delta, cens
+end
+
+"""
+Load and prepare real epidemic data from WSU.csv file.
+"""
+function load_real_data(csv_file::String, Tmax::Float64)
+    # Load the data
+    df = CSV.read(csv_file, DataFrame)
+    
+    # Prepare the data 
+    ti, delta, cens = prep_sds(df, Tmax)
+    
+    # Convert to appropriate format for analysis
+    K = length(ti)  # Total number of infections
+    
+    # Convert infection times to discrete time steps 
+    ti_discrete = clamp.(round.(Int, ti) .+ 1, 1, 1_000_000) #So day 0 isn't dropped
+    nsteps = max(maximum(ti_discrete), 105) # 105 days of data
+    
+    # Create histogram of infection times
+    th = time_counts(ti_discrete, nsteps)
+    
+    # Convert recovery intervals to integers (rounding to nearest day)
+    delta_discrete = max.(1, round.(Int, delta))
+    @assert sum(th) == K "sum(th) must equal K, check infection day discretisation"
+    
+    return Dict(
+        :K => K,
+        :ti => ti_discrete,
+        :delta => delta_discrete,
+        :th => th,
+        :nsteps => nsteps,
+        :cens => cens,
+        :ti_original => ti,
+        :delta_original => delta
+    )
+end
+```
+
+## SIR model
+
+The model is a discrete-time SIR model with geometric recovery times. In this model we assume that the recovery time is the same for all individuals and that the recovery time is independent of the infection time. 
+
+```{julia}
+#| echo: true
+#| output: false
+
+function sir_map!(du, u, p, t)
+    (S, I, C, Y) = u
+    (β, γ) = p
+    infection = rate_to_proportion(β*I)*S     # New infections
+    recovery = rate_to_proportion(γ)*I        # New recoveries
+    @inbounds begin
+        du[1] = S - infection                 # Update susceptibles
+        du[2] = I + infection-recovery        # Update infected
+        du[3] = C + infection                 # Update cumulative infections
+        du[4] = infection                     # Store new infections
+    end
+    nothing
+end
+
+function solve_map(f, u0, nsteps, p)
+    # Pre-allocate array 
+    sol = similar(u0, length(u0), nsteps + 1)
+    # Initialise the first column with the initial state
+    sol[:, 1] = u0
+    # Iterate over the time steps
+    @inbounds for t in 2:nsteps+1
+        u = @view sol[:, t-1] # Get the current state
+        du = @view sol[:, t]  # Prepare the next state
+        f(du, u, p, t)        # Call the function to update du
+    end
+    return sol
+end
+
+function simulate(β, γ, ρ, nsteps)
+    tspan = (0, nsteps)
+    u0 = [1-ρ, ρ, 0.0, 0.0] # Initial conditions: S, I, C, Y
+    p = [β, γ]
+    sol = solve_map(sir_map!, u0, nsteps, p)
+    τ = sol[3,end]      # Final size (total infected)
+    f = sol[4,2:end]    # New infections per time step
+    f = abs.(f)         # Ensure non-negative values
+    # Handle edge cases 
+    if τ <= 0 || any(isnan.(f)) || any(isinf.(f))
+        f = fill(one(eltype(f))/nsteps, nsteps)
+    else
+        f = f./τ         # Normalise frequencies
+    end 
+    return sol, τ, f
+end
+```
+
+## Data loading and preparation
+
+Load the WSU data and prepare the data for inference.
+```{julia}
+#| echo: true
+#| output: false
+
+Tmax = 105.0
+real_data = load_real_data("WSU.csv", Tmax)
+```
+
+Plot of the infection time observations
+```{julia}
+#| echo: true
+#| output: true
+bar(0:(real_data[:nsteps] - 1), real_data[:th], title="Infection time observations", xlabel="Time step", ylabel="Observations", legend=false)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("Total infections: $(real_data[:K])")
+println("Time steps: $(real_data[:nsteps])")
+println("Number of censored observations: $(sum(real_data[:cens]))")
+println("Mean infection time: $(round(mean(real_data[:ti_original]), digits=2))")
+println("Mean recovery interval: $(round(mean(real_data[:delta_original]), digits=2))")
+
+# Infection time distribution
+peak_time = argmax(real_data[:th])
+peak_infections = maximum(real_data[:th])
+println("Peak infections: $peak_infections at time step $peak_time")
+```
+
+## Turing model
+
+The Turing.jl probabilistic model used to infer the parameters from this dataset employs the previously defined discrete-time SIR model. 
+
+```{julia}
+#| echo: true
+#| output: false
+@model function dsa_discrete_turing_multinomial(N::Int,     # Initial susceptibles 
+                                   M::Int,                  # Initial infected 
+                                   nsteps::Int,             # Number of time steps
+                                   K::Int,                  # Observed total infections
+                                   th::Vector{Int},         # Histogram of infection times
+                                   delta::Vector{Int},      # Observed recovery intervals
+                                   cens::Vector{Bool})      # Censoring (true=right-censored)
+    
+    # Priors for model parameters
+    β ~ Uniform(0.01, 5.0)   # Transmission rate 
+    γ ~ Uniform(0.01, 1.0)   # Recovery rate 
+    ρ ~ Beta(0.01, 1.0)      # Initial infected proportion 
+    
+    # Simulate deterministic model 
+    _, τ, f = simulate(β, γ, ρ, nsteps)
+    
+    # Ensure τ is valid for binomial distribution
+    τ_valid = max(min(τ, 1.0), 0.0)
+    
+    # Ensure f is valid for multinomial distribution
+    f_valid = max.(f, 1e-10)           # Add small positive value to avoid zeros
+    f_valid = f_valid ./ sum(f_valid)   # Normalise
+    
+    # Likelihood for number of infections
+    K ~ Binomial(N, τ_valid)
+    
+    # Likelihood for infection times 
+    th ~ Multinomial(K, f_valid)
+    
+    # Likelihood for recovery times 
+    ϵ = 1e-8
+    pγ = rate_to_proportion(γ)
+    pγ_valid = min(max(pγ, ϵ), 1 - ϵ)
+    log_surv = log1p(-pγ_valid)
+    for i in eachindex(delta)
+        if cens[i]
+            Turing.@addlogprob!(delta[i] * log_surv)  # log P(not yet recovered by step delta[i])
+        else
+            delta[i] ~ Geometric(pγ_valid)
+        end
+    end
+    
+    return (β=β, γ=γ, ρ=ρ)
+end
+```
+
+Model parameters:
+
+```{julia}
+#| echo: true
+#| output: false
+
+N = 7250   # Population size
+M = 1      # Initial infected
+
+th = real_data[:th]         # Infection times
+K = sum(th)                 # Total infections
+delta = real_data[:delta]   # Recovery intervals
+cens  = real_data[:cens]    # Censoring
+nsteps = real_data[:nsteps] # Number of time steps
+```
+
+## Running the inference
+
+```{julia}
+#| echo: true
+#| output: false
+model = dsa_discrete_turing_multinomial(N, M, nsteps, K, th, delta, cens);
+
+n_samples = 1000;
+_ = sample(model, NUTS(), 1)
+@time chain = sample(model,
+                     NUTS(500, 0.65; max_depth=10, Δ_max=1000.0, init_ϵ=0.2),
+                     n_samples);
+```
+
+## Results
+
+Once we have run the sampler, we can get a summary of the parameter estimates
+
+```{julia}
+#| echo: true
+#| output: true
+
+describe(chain)
+```
+
+Plot trace plots for MCMC diagnostics
+```{julia}
+#| echo: true
+#| output: true
+
+plot(chain, plot_title="Trace plots")
+```
+
+Extract parameter estimates mean values
+```{julia}
+#| echo: true
+#| output: false
+
+# Extract parameter estimates
+β_post = mean(chain[:β])
+γ_post = mean(chain[:γ])
+ρ_post = mean(chain[:ρ])
+```
+
+Plot model fit
+```{julia}
+#| echo: false
+#| output: true
+
+# Simulate with inferred parameters 
+_, τ_post, f_post = simulate(β_post, γ_post, ρ_post, nsteps)
+
+# Calculate simulated infections correctly for plotting
+simulated_infections = f_post .* τ_post .* N  # Scale by epidemic size
+
+# Create plots
+p_inf = plot()
+
+# Plot infection time histogram from real data
+bar!(p_inf, 1:nsteps, real_data[:th], label="Observed")
+
+# Plot simulated infections with inferred parameters
+plot!(p_inf, 1:nsteps, simulated_infections, label="Inferred", color=:red, 
+      linestyle=:dash, linewidth=3)
+
+# Add labels and title
+plot!(p_inf, xlabel="Time", ylabel="Count of infections", 
+      title="Infection times", 
+      legend=:topright, grid=true)
+
+# Show the plot
+display(p_inf)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+# Recovery interval distribution
+p_recovery = histogram(delta, bins=20, alpha=0.7, label="Observed recovery intervals",
+                      xlabel="Time (days)", ylabel="Frequency",
+                      title="Recovery intervals")
+
+# Add theoretical geometric distribution
+pγ_fitted = rate_to_proportion(γ_post)
+x_range = 0:maximum(delta)
+y_fitted = pdf.(Geometric(pγ_fitted), x_range) .* length(delta)
+plot!(p_recovery, x_range, y_fitted, label="Fitted", 
+      color=:red, linewidth=3)
+
+display(p_recovery)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+println("Final epidemic size (simulated): τ * N = $(round(τ_post*N, digits=2))")
+println("Total observed infections: $K")
+println("Mean recovery time (observed): $(round(mean(real_data[:delta_original]), digits=2)) days")
+println("Mean recovery time (fitted): $(round(1/γ_post, digits=2)) days")
+
+# Calculate infections fit 
+observed_infections = sum(th)
+predicted_infections = sum(simulated_infections)
+println("Observed total infections: $observed_infections")
+println("Predicted total infections: $(round(predicted_infections, digits=1))")
+
+# Calculate recovery time fit
+observed_mean = mean(delta)
+fitted_mean = 1/γ_post
+recovery_fit_error = abs(observed_mean - fitted_mean) / observed_mean
+println("Recovery time fit error: $(round(recovery_fit_error * 100, digits=1))%")
+```
+
+## Comparison to KhudaBukhsh et al. (2019) results
+
+We plot the S_t curve and the final epidemic size distribution to compare our observed and simulated data, with that obtained in KhudaBukhsh et al. (2019).
+
+```{julia}
+#| echo: false
+#| output: true
+
+# Simulate with inferred parameters 
+sol, τ_post, f_post = simulate(β_post, γ_post, ρ_post, nsteps)
+
+# Extract susceptible population over time (scaled to population size N)
+S_traj = sol[1, :] .* N  # First row contains S values
+
+# Calculate observed susceptible population over time
+S_observed = zeros(nsteps + 1)
+S_observed[1] = (1 - ρ_post) * N  # Initial susceptible
+
+# Subtract cumulative infections at each time step
+cumulative_infections = cumsum(real_data[:th])
+for t in 1:nsteps
+    S_observed[t + 1] = S_observed[1] - cumulative_infections[t]
+end
+
+# Create plot of susceptible population over time
+p_susceptible = plot(0:nsteps, S_traj, 
+                    label="Inferred", 
+                    color=:blue, 
+                    linewidth=3,
+                    xlabel="Time", 
+                    ylabel="Count of susceptibles",
+                    title="S_t curve",
+                    legend=:topright, 
+                    grid=true)
+
+# Add observed susceptible population
+plot!(p_susceptible, 0:nsteps, S_observed, 
+      label="Observed", 
+      color=:red, 
+      linewidth=3,
+      linestyle=:dash)
+
+display(p_susceptible)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+# Calculate final epidemic size from the MCMC samples
+final_size_samples = Float64[]
+for i in 1:length(chain[:β])  
+    β_i = chain[:β][i]
+    γ_i = chain[:γ][i]
+    ρ_i = chain[:ρ][i]
+    
+    # Simulate with these parameters
+    _, τ_i, _ = simulate(β_i, γ_i, ρ_i, nsteps)
+    
+    # Calculate final epidemic size in absolute numbers
+    final_size = τ_i * N
+    push!(final_size_samples, final_size)
+end
+
+# Create histogram of the final epidemic size distribution
+p_final_size = histogram(final_size_samples, bins=20, alpha=0.7, 
+                        label=false, 
+                        color=:blue,
+                        normalize=:pdf,  # This makes y-axis density
+                        xlabel="Final size", 
+                        ylabel="Density",
+                        title="Final epidemic size")
+
+# Add vertical line for the mean
+final_size_mean = mean(final_size_samples)
+vline!([final_size_mean], label="Mean = $(round(final_size_mean, digits=0))", 
+       color=:red, linewidth=3, linestyle=:dash)
+
+# Add vertical line for the observed total infections
+vline!([K], label="Observed = $K", 
+       color=:green, linewidth=3, linestyle=:dot)
+
+display(p_final_size)
+```
+
+## Discussion 
+
+The analysis performed on the WSU H1N1 outbreak dataset from 2009 showed that the discrete SIR model, with geometric recovery times, captured the dynamics of the epidemic. It was able to infer key parameters from the data and provided estimations that approximate the timing of infections and the distribution of recovery times.
+
+This approach offers several advantages: a simple and interpretable modelling framework, fast computation and inference through Turing.jl, and clear parameter interpretation (transmission rate β, recovery rate γ, and initial infected proportion ρ). However, it's important to note that the model relies on key assumptions, including geometric recovery times and the modification of the original dataset to include recovery intervals, as the primary data only contained daily infection counts.
+
+
+
