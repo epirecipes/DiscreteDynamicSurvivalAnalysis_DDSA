@@ -21,7 +21,7 @@ execute:
 
 ## Introduction
 
-In this example, we use a discrete-time SIR model and Turing.jl to infer key epidemiological parameters from a dataset. This dataset originates from a study conducted on the H1N1 outbreak at Washington State University (WSU) in 2009, recording the number of daily cases over a period of 105 days. The dataset was obtained from [KhudaBukhsh et al. (2019)](https://github.com/cbskust/SDS.Epidemic/tree/master). They modified the original raw data, that only included daily counts of new infections, by reconstructing individual infection times from the daily case counts and generating individual recovery times from a Gamma distribution fitted to the recovery process. The resulting dataset (WSU.csv) contains individual-level infection times (first column) and recovery times (second column) for 2,276 cases, including 10 individuals whose recovery occurred after the 105-day observation window and are therefore treated as right-censored.  
+In this example, we use a discrete-time SIR model and Turing.jl to infer the susceptible population $N$, the transmission rate ($\beta$), recovery-rate parameter ($\gamma$), and the initial infected proportion ($\rho$) from line-list data. This dataset originates from a study conducted on the H1N1 outbreak at Washington State University (WSU) in 2009, recording the number of daily cases over a period of 105 days. The dataset was obtained from [KhudaBukhsh et al. (2019)](https://github.com/cbskust/SDS.Epidemic/tree/master). The original raw data only included daily counts of new infections; KhudaBukhsh et al.\ reconstructed individual infection times from those counts and generated individual recovery times by sampling from an exponential distribution with rate $\gamma$ fixed at $1/5.5$ per day, the mean of prior infectious-period estimates. The resulting dataset (WSU.csv) contains individual-level infection times (first column) and recovery times (second column) for 2,276 cases, including 10 individuals whose recovery occurred after the 105-day observation window and are therefore treated as right-censored.
 
 ## Libraries
 
@@ -240,8 +240,8 @@ The Turing.jl probabilistic model used to infer the parameters from this dataset
 ```{julia}
 #| echo: true
 #| output: false
-@model function dsa_discrete_turing_multinomial(N::Int,     # Initial susceptibles 
-                                   M::Int,                  # Initial infected 
+@model function dsa_discrete_turing_multinomial_inferN(
+                                   N_max::Int,              # Upper bound for susceptible population (e.g. total student body)
                                    nsteps::Int,             # Number of time steps
                                    K::Int,                  # Observed total infections
                                    th::Vector{Int},         # Histogram of infection times
@@ -249,8 +249,9 @@ The Turing.jl probabilistic model used to infer the parameters from this dataset
                                    cens::Vector{Bool})      # Censoring (true=right-censored)
     
     # Priors for model parameters
+    N ~ DiscreteUniform(K + 1, N_max)   # Susceptible pool
     β ~ Uniform(0.01, 5.0)   # Transmission rate 
-    γ ~ Uniform(0.01, 1.0)   # Recovery rate 
+    γ ~ truncated(LogNormal(log(1/5.5), 0.3), 0.01, 1.0)   # Recovery rate 
     ρ ~ Beta(0.01, 1.0)      # Initial infected proportion 
     
     # Simulate deterministic model 
@@ -282,7 +283,7 @@ The Turing.jl probabilistic model used to infer the parameters from this dataset
         end
     end
     
-    return (β=β, γ=γ, ρ=ρ)
+    return (N=N, β=β, γ=γ, ρ=ρ)
 end
 ```
 
@@ -292,8 +293,7 @@ Model parameters:
 #| echo: true
 #| output: false
 
-N = 7250   # Population size
-M = 1      # Initial infected
+N_max = 18000   # WSU total student body (KhudaBukhsh et al. (2020))
 
 th = real_data[:th]         # Infection times
 K = sum(th)                 # Total infections
@@ -307,13 +307,34 @@ nsteps = real_data[:nsteps] # Number of time steps
 ```{julia}
 #| echo: true
 #| output: false
-model = dsa_discrete_turing_multinomial(N, M, nsteps, K, th, delta, cens);
+model = dsa_discrete_turing_multinomial_inferN(N_max, nsteps, K, th, delta, cens);
 
-n_samples = 1000;
-_ = sample(model, NUTS(), 1)
-@time chain = sample(model,
-                     NUTS(500, 0.65; max_depth=10, Δ_max=1000.0, init_ϵ=0.2),
-                     n_samples);
+n_samples  = 8000
+nuts_adapt = 2000
+n_chains   = 4
+σ_N        = 1000  # Discrete random walk for N with a window ±σ_N 
+N_proposal(vnt) = (n = vnt[@varname(N)];
+                   DiscreteUniform(max(K + 1, n - σ_N), min(N_max, n + σ_N)))
+
+gibbs_sampler = Gibbs(
+    :N => MH(:N => N_proposal),
+    (:β, :γ, :ρ) => NUTS(nuts_adapt, 0.8; max_depth=12, Δ_max=1000.0)
+)
+
+# Different initial values per chain (wide range for N, small offsets for β/γ/ρ)
+# to improve exploration
+init_params_vec = [
+    (N = round(Int, 4_000 + 4_000 * (i - 1)),
+     β = 0.15 + 0.03 * (i - 1) / max(n_chains - 1, 1),
+     γ = 0.16 + 0.04 * (i - 1) / max(n_chains - 1, 1),
+     ρ = 0.03 + 0.03 * (i - 1) / max(n_chains - 1, 1))
+    for i in 1:n_chains
+]
+
+_ = sample(model, gibbs_sampler, 1; progress=false, initial_params=init_params_vec[1])
+
+@time chain = sample(model, gibbs_sampler, MCMCThreads(), n_samples, n_chains;
+                     progress=false, initial_params=init_params_vec);
 ```
 
 ## Results
@@ -335,15 +356,69 @@ Plot trace plots for MCMC diagnostics
 plot(chain, plot_title="Trace plots")
 ```
 
-Extract parameter estimates mean values
+Extract parameter estimates median values
 ```{julia}
 #| echo: true
 #| output: false
 
 # Extract parameter estimates
-β_post = mean(chain[:β])
-γ_post = mean(chain[:γ])
-ρ_post = mean(chain[:ρ])
+N_post = round(Int, median(chain[:N]))
+β_post = median(chain[:β])
+γ_post = median(chain[:γ])
+ρ_post = median(chain[:ρ])
+```
+
+Posterior summaries with 95% credible intervals. Derived quantities (R₀ and mean infectious period) are computed sample-by-sample from the chain.
+
+```{julia}
+#| echo: true
+#| output: true
+
+N_chain  = vec(chain[:N])
+β_chain  = vec(chain[:β])
+γ_chain  = vec(chain[:γ])
+ρ_chain  = vec(chain[:ρ])
+pγ_chain = rate_to_proportion.(γ_chain)
+
+R0_chain       = β_chain ./ pγ_chain   # R0 of the discrete process = β / (1 - exp(-γ))
+IP_steps_chain = 1 ./ pγ_chain         # mean infectious period in steps (geometric, the actual fitted process)
+tau_chain      = K ./ N_chain          # observed attack rate posterior
+
+function posterior_summary(x; digits=4)
+    (median = round(median(x); digits=digits),
+     mean   = round(mean(x);   digits=digits),
+     q025   = round(quantile(x, 0.025); digits=digits),
+     q975   = round(quantile(x, 0.975); digits=digits))
+end
+
+posterior_table = (
+    N         = posterior_summary(N_chain; digits=0),
+    β         = posterior_summary(β_chain),
+    γ         = posterior_summary(γ_chain),
+    ρ         = posterior_summary(ρ_chain),
+    R0        = posterior_summary(R0_chain),
+    IP_steps  = posterior_summary(IP_steps_chain; digits=2),
+    K_over_N  = posterior_summary(tau_chain),
+)
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
+for (name, s) in pairs(posterior_table)
+    println(rpad(string(name), 10),
+            "  median = ", s.median,
+            "   mean = ",   s.mean,
+            "   95% CI = [", s.q025, ", ", s.q975, "]")
+end
+
+println()
+println("Convergence diagnostics:")
+ess_summary = MCMCDiagnosticTools.ess(chain)
+rhat_summary = MCMCDiagnosticTools.rhat(chain)
+display(ess_summary)
+display(rhat_summary)
 ```
 
 Plot model fit
@@ -355,7 +430,7 @@ Plot model fit
 _, τ_post, f_post = simulate(β_post, γ_post, ρ_post, nsteps)
 
 # Calculate simulated infections correctly for plotting
-simulated_infections = f_post .* τ_post .* N  # Scale by epidemic size
+simulated_infections = f_post .* τ_post .* N_post  # Scale by inferred epidemic size
 
 # Create plots
 p_inf = plot()
@@ -381,7 +456,7 @@ display(p_inf)
 #| output: true
 
 # Recovery interval distribution
-p_recovery = histogram(delta, bins=20, alpha=0.7, label="Observed recovery intervals",
+p_recovery = histogram(delta, bins=100, alpha=0.7, label="Observed recovery intervals",
                       xlabel="Time (days)", ylabel="Frequency",
                       title="Recovery intervals")
 
@@ -399,10 +474,13 @@ display(p_recovery)
 #| echo: false
 #| output: true
 
-println("Final epidemic size (simulated): τ * N = $(round(τ_post*N, digits=2))")
+println("Final epidemic size (simulated, at median N): τ * N̂ = $(round(τ_post * N_post, digits=2))")
 println("Total observed infections: $K")
-println("Mean recovery time (observed): $(round(mean(real_data[:delta_original]), digits=2)) days")
-println("Mean recovery time (fitted): $(round(1/γ_post, digits=2)) days")
+println("Inferred susceptible population (median): N̂ = $N_post")
+println("Mean recovery time (observed delta, hosp - onset): $(round(mean(real_data[:delta_original]), digits=2)) days")
+let pγ̂ = rate_to_proportion(γ_post)
+    println("Mean recovery delta (fitted, (1 - p_γ̂)/p_γ̂): $(round((1 - pγ̂)/pγ̂, digits=2)) days")
+end
 
 # Calculate infections fit 
 observed_infections = sum(th)
@@ -412,9 +490,11 @@ println("Predicted total infections: $(round(predicted_infections, digits=1))")
 
 # Calculate recovery time fit
 observed_mean = mean(delta)
-fitted_mean = 1/γ_post
-recovery_fit_error = abs(observed_mean - fitted_mean) / observed_mean
-println("Recovery time fit error: $(round(recovery_fit_error * 100, digits=1))%")
+let pγ̂ = rate_to_proportion(γ_post)
+    fitted_mean = (1 - pγ̂) / pγ̂ 
+    recovery_fit_error = abs(observed_mean - fitted_mean) / observed_mean
+    println("Recovery delta fit error (observed vs (1-p_γ̂)/p_γ̂): $(round(recovery_fit_error * 100, digits=1))%")
+end
 ```
 
 ## Comparison to KhudaBukhsh et al. (2019) results
@@ -428,12 +508,12 @@ We plot the S_t curve and the final epidemic size distribution to compare our ob
 # Simulate with inferred parameters 
 sol, τ_post, f_post = simulate(β_post, γ_post, ρ_post, nsteps)
 
-# Extract susceptible population over time (scaled to population size N)
-S_traj = sol[1, :] .* N  # First row contains S values
+# Extract susceptible population over time (scaled to inferred N̂)
+S_traj = sol[1, :] .* N_post  # First row contains S values
 
 # Calculate observed susceptible population over time
 S_observed = zeros(nsteps + 1)
-S_observed[1] = (1 - ρ_post) * N  # Initial susceptible
+S_observed[1] = (1 - ρ_post) * N_post  # Initial susceptible
 
 # Subtract cumulative infections at each time step
 cumulative_infections = cumsum(real_data[:th])
@@ -472,39 +552,49 @@ for i in 1:length(chain[:β])
     β_i = chain[:β][i]
     γ_i = chain[:γ][i]
     ρ_i = chain[:ρ][i]
+    N_i = chain[:N][i]
     
     # Simulate with these parameters
     _, τ_i, _ = simulate(β_i, γ_i, ρ_i, nsteps)
     
     # Calculate final epidemic size in absolute numbers
-    final_size = τ_i * N
+    final_size = τ_i * N_i
     push!(final_size_samples, final_size)
 end
 
 # Create histogram of the final epidemic size distribution
-p_final_size = histogram(final_size_samples, bins=20, alpha=0.7, 
+p_final_size = histogram(final_size_samples, bins=100, alpha=0.7, 
                         label=false, 
                         color=:blue,
                         normalize=:pdf,  # This makes y-axis density
                         xlabel="Final size", 
                         ylabel="Density",
+                        xlims=(2000, 2500),
                         title="Final epidemic size")
 
 # Add vertical line for the mean
-final_size_mean = mean(final_size_samples)
-vline!([final_size_mean], label="Mean = $(round(final_size_mean, digits=0))", 
+final_size_median = median(final_size_samples)
+final_size_ci    = quantile(final_size_samples, [0.025, 0.975])
+vline!([final_size_median], label="Median = $(round(final_size_median, digits=0))",
        color=:red, linewidth=3, linestyle=:dash)
-
-# Add vertical line for the observed total infections
-vline!([K], label="Observed = $K", 
+vline!([K], label="Observed = $K",
        color=:green, linewidth=3, linestyle=:dot)
 
 display(p_final_size)
 ```
 
+```{julia}
+#| echo: false
+#| output: true
+
+println("Final size posterior: 
+median = $(round(final_size_median, digits=0))   
+95% CI = [$(round(final_size_ci[1], digits=0)), $(round(final_size_ci[2], digits=0))]")
+```
+
 ## Discussion 
 
-The analysis performed on the WSU H1N1 outbreak dataset from 2009 showed that the discrete SIR model, with geometric recovery times, captured the dynamics of the epidemic. It was able to infer key parameters from the data and provided estimations that approximate the timing of infections and the distribution of recovery times.
+The analysis performed on the WSU H1N1 outbreak dataset from 2009 showed that the discrete SIR model, with geometric recovery times, captured the dynamics of the epidemic. The susceptible population $N$ has a posterior median of $9{,}143$ (95\% CI $[7{,}017,\,13{,}331]$), which overlaps the estimate of $7{,}051$ (90\% CI $[6{,}602,\,7{,}581]$) reported by KhudaBukhsh et al. (2020).
 
 This approach offers several advantages: a simple and interpretable modelling framework, fast computation and inference through Turing.jl, and clear parameter interpretation (transmission rate β, recovery rate γ, and initial infected proportion ρ). However, it's important to note that the model relies on key assumptions, including geometric recovery times and the modification of the original dataset to include recovery intervals, as the primary data only contained daily infection counts.
 
