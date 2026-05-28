@@ -1,6 +1,7 @@
 # DiscreteDynamicSurvivalAnalysis
 
 This repository contains examples of discrete dynamic survival analysis.
+We are currently finalising our manuscript. A link to the preprint will be added here![](https://img.shields.io/badge/Preprint-Coming_Soon-blue)
 
 ## Synthetic data case scenarios:
 
