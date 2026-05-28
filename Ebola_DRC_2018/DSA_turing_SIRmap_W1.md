@@ -382,8 +382,8 @@ describe(chain)
     Iterations        = 501:1:5500
     Number of chains  = 4
     Samples per chain = 5000
-    Wall duration     = 1881.72 seconds
-    Compute duration  = 5105.48 seconds
+    Wall duration     = 1906.1 seconds
+    Compute duration  = 5148.76 seconds
     parameters        = β, γ, ρ, N_float
     internals         = n_steps, is_accept, acceptance_rate, log_density, hamiltonian_energy, hamiltonian_energy_error, max_hamiltonian_energy_error, tree_depth, numerical_error, step_size, nom_step_size, lp, logprior, loglikelihood
 
@@ -419,27 +419,27 @@ NUTS diagnostics:
 We can also plot posterior distributions for each parameter.
 
 ``` julia
-β_mean = mean(chain[:β])
-γ_mean = mean(chain[:γ])
-ρ_mean = mean(chain[:ρ])
-N_mean = mean(chain[:N_float])
+β_med = median(chain[:β])
+γ_med = median(chain[:γ])
+ρ_med = median(chain[:ρ])
+N_med = median(chain[:N_float])
 
 # Vossler et al. (2022) Wave 1 reference values
 p1 = histogram(chain[:β], label="", title="β", density=true)
 vline!(p1, [0.190], label="Ref (Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p1, [β_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p1, [β_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 p2 = histogram(chain[:γ], label="", title="γ", density=true)
 vline!(p2, [0.185], label="Ref -log(1- γ)(Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p2, [γ_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p2, [γ_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 p3 = histogram(chain[:ρ], label="", title="ρ", density=true)
 vline!(p3, [0.00021], label="Ref (Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p3, [ρ_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p3, [ρ_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 # N is wave-specific
 p4 = histogram(chain[:N_float], label="", title="N (Wave 1)", density=true, bins=50)
-vline!(p4, [N_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p4, [N_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 plot(p1, p2, p3, p4, layout=(2,2), plot_title="Posterior Distributions — Wave 1")
 ```
@@ -458,15 +458,57 @@ plot(chain, plot_title="Trace Plots - Wave 1")
 
 We summarise the posterior estimates for the model parameters.
 
-    Parameter Estimates — Wave 1 (all records, posterior means with 95% CI):
-    β:      0.19 [0.179, 0.202]  (Vossler et al.: 0.190)
-    γ:      0.185 [0.171, 0.2]  (Vossler et al.: 0.169)
-    pγ=1-e⁻ᵞ: 0.169
-    ρ:      0.00022 [0.00017, 0.00027]  (Vossler et al.: 0.00021)
-    N:      5061.0 [4342.0, 5931.0]
-    I₀=ρ·N:  1.1 [0.8, 1.5]  (implied initial infected)
-    R₀=β/pγ: 1.126  (Vossler et al. β/γ: 1.124)
-    mean IP=1/pγ: 5.91 days  (Vossler et al. 1/γ: 5.9 d)
+``` julia
+β_chain  = vec(chain[:β])
+γ_chain  = vec(chain[:γ])
+ρ_chain  = vec(chain[:ρ])
+N_chain  = vec(chain[:N_float])
+pγ_chain = rate_to_proportion.(γ_chain)
+
+R0_chain       = β_chain ./ pγ_chain           # R0 of the discrete process
+IP_steps_chain = 1 ./ pγ_chain                 # mean infectious period in steps (1-indexed Geometric)
+I0_chain       = ρ_chain .* N_chain            # implied initial infected count
+tau_chain      = K_total ./ N_chain            # observed attack rate posterior
+
+# Posterior point estimates (medians)
+β_post  = median(β_chain)
+γ_post  = median(γ_chain)
+ρ_post  = median(ρ_chain)
+N_post  = median(N_chain)
+pγ_post = rate_to_proportion(γ_post)
+
+function posterior_summary(x; digits=4)
+    (median = round(median(x); digits=digits),
+     mean   = round(mean(x);   digits=digits),
+     q025   = round(quantile(x, 0.025); digits=digits),
+     q975   = round(quantile(x, 0.975); digits=digits))
+end
+
+posterior_table = (
+    N         = posterior_summary(N_chain;        digits=0),
+    β         = posterior_summary(β_chain;        digits=4),
+    γ         = posterior_summary(γ_chain;        digits=4),
+    ρ         = posterior_summary(ρ_chain;        digits=5),
+    R0        = posterior_summary(R0_chain;       digits=3),
+    IP_steps  = posterior_summary(IP_steps_chain; digits=2),
+    I0        = posterior_summary(I0_chain;       digits=2),
+    K_over_N  = posterior_summary(tau_chain;      digits=4),
+)
+```
+
+    (N = (median = 5031.0, mean = 5061.0, q025 = 4342.0, q975 = 5931.0), β = (median = 0.1903, mean = 0.1904, q025 = 0.1786, q975 = 0.2025), γ = (median = 0.1851, mean = 0.1853, q025 = 0.1715, q975 = 0.1998), ρ = (median = 0.00022, mean = 0.00022, q025 = 0.00017, q975 = 0.00027), R0 = (median = 1.126, mean = 1.126, q025 = 1.11, q975 = 1.143), IP_steps = (median = 5.92, mean = 5.92, q025 = 5.52, q975 = 6.35), I0 = (median = 1.09, mean = 1.1, q025 = 0.77, q975 = 1.5), K_over_N = (median = 0.1803, mean = 0.1804, q025 = 0.1529, q975 = 0.2089))
+
+    N           median = 5031.0   mean = 5061.0   95% CI = [4342.0, 5931.0]
+    β           median = 0.1903   mean = 0.1904   95% CI = [0.1786, 0.2025]
+    γ           median = 0.1851   mean = 0.1853   95% CI = [0.1715, 0.1998]
+    ρ           median = 0.00022   mean = 0.00022   95% CI = [0.00017, 0.00027]
+    R0          median = 1.126   mean = 1.126   95% CI = [1.11, 1.143]
+    IP_steps    median = 5.92   mean = 5.92   95% CI = [5.52, 6.35]
+    I0          median = 1.09   mean = 1.1   95% CI = [0.77, 1.5]
+    K_over_N    median = 0.1803   mean = 0.1804   95% CI = [0.1529, 0.2089]
+
+    Vossler et al. (2022) Wave 1 reference (continuous-time, β/γ):
+      β = 0.190, γ = 0.169, ρ = 0.00021, β/γ = 1.124, 1/γ = 5.9 d
 
 ## Recovery interval fit check
 
@@ -490,7 +532,7 @@ plot!(pδ, ks, pmf; linewidth=2, color=:red, label="Fitted Geometric(pγ)")
 pδ
 ```
 
-![](DSA_turing_SIRmap_W1_files/figure-commonmark/cell-20-output-1.svg)
+![](DSA_turing_SIRmap_W1_files/figure-commonmark/cell-21-output-1.svg)
 
 ## Epidemic curve
 
@@ -523,7 +565,7 @@ plot!(p1, 1:nsteps, f,
 plot(p1, size=(800, 500))
 ```
 
-![](DSA_turing_SIRmap_W1_files/figure-commonmark/cell-21-output-1.svg)
+![](DSA_turing_SIRmap_W1_files/figure-commonmark/cell-22-output-1.svg)
 
 ## Discussion
 

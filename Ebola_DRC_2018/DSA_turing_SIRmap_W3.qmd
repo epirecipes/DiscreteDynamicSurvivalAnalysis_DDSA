@@ -383,27 +383,27 @@ We can also plot posterior distributions for each parameter.
 ```{julia}
 #| echo: true
 #| output: true
-β_mean = mean(chain[:β])
-γ_mean = mean(chain[:γ])
-ρ_mean = mean(chain[:ρ])
-N_mean = mean(chain[:N_float])
+β_med = median(chain[:β])
+γ_med = median(chain[:γ])
+ρ_med = median(chain[:ρ])
+N_med = median(chain[:N_float])
 
 # Vossler et al. (2022) Wave 1 reference values
 p1 = histogram(chain[:β], label="", title="β", density=true)
 vline!(p1, [0.235], label="Ref (Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p1, [β_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p1, [β_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 p2 = histogram(chain[:γ], label="", title="γ", density=true)
 vline!(p2, [0.241], label="Ref -log(1- γ)(Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p2, [γ_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p2, [γ_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 p3 = histogram(chain[:ρ], label="", title="ρ", density=true)
 vline!(p3, [0.0067], label="Ref (Vossler et al.)", color=:black, linestyle=:dash, linewidth=2)
-vline!(p3, [ρ_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p3, [ρ_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 # N is wave-specific
 p4 = histogram(chain[:N_float], label="", title="N (Wave 3)", density=true, bins=50)
-vline!(p4, [N_mean], label="Posterior mean", color=:red, linestyle=:dash, linewidth=2)
+vline!(p4, [N_med], label="Posterior median", color=:red, linestyle=:dash, linewidth=2)
 
 plot(p1, p2, p3, p4, layout=(2,2), plot_title="Posterior Distributions — Wave 3")
 ```
@@ -421,33 +421,58 @@ plot(chain, plot_title="Trace Plots — Wave 3")
 We summarise the posterior estimates for the model parameters.
 
 ```{julia}
+#| echo: true
+#| output: true
+β_chain  = vec(chain[:β])
+γ_chain  = vec(chain[:γ])
+ρ_chain  = vec(chain[:ρ])
+N_chain  = vec(chain[:N_float])
+pγ_chain = rate_to_proportion.(γ_chain)
+
+R0_chain       = β_chain ./ pγ_chain           # R0 of the discrete process
+IP_steps_chain = 1 ./ pγ_chain                 # mean infectious period in steps (1-indexed Geometric)
+I0_chain       = ρ_chain .* N_chain            # implied initial infected count
+tau_chain      = K_total ./ N_chain            # observed attack rate posterior
+
+# Posterior point estimates (medians)
+β_post  = median(β_chain)
+γ_post  = median(γ_chain)
+ρ_post  = median(ρ_chain)
+N_post  = median(N_chain)
+pγ_post = rate_to_proportion(γ_post)
+
+function posterior_summary(x; digits=4)
+    (median = round(median(x); digits=digits),
+     mean   = round(mean(x);   digits=digits),
+     q025   = round(quantile(x, 0.025); digits=digits),
+     q975   = round(quantile(x, 0.975); digits=digits))
+end
+
+posterior_table = (
+    N         = posterior_summary(N_chain;        digits=0),
+    β         = posterior_summary(β_chain;        digits=4),
+    γ         = posterior_summary(γ_chain;        digits=4),
+    ρ         = posterior_summary(ρ_chain;        digits=5),
+    R0        = posterior_summary(R0_chain;       digits=3),
+    IP_steps  = posterior_summary(IP_steps_chain; digits=2),
+    I0        = posterior_summary(I0_chain;       digits=2),
+    K_over_N  = posterior_summary(tau_chain;      digits=4),
+)
+```
+
+```{julia}
 #| echo: false
 #| output: true
-β_post = mean(chain[:β])
-γ_post = mean(chain[:γ])
-ρ_post = mean(chain[:ρ])
-N_post = mean(chain[:N_float])
+for (name, s) in pairs(posterior_table)
+    println(rpad(string(name), 10),
+            "  median = ", s.median,
+            "   mean = ",   s.mean,
+            "   95% CI = [", s.q025, ", ", s.q975, "]")
+end
 
-ci_β = quantile(chain[:β],       [0.025, 0.975])
-ci_γ = quantile(chain[:γ],       [0.025, 0.975])
-ci_ρ = quantile(chain[:ρ],       [0.025, 0.975])
-ci_N = quantile(chain[:N_float], [0.025, 0.975])
-
-i0_chain = chain[:ρ] .* chain[:N_float]
-ci_I0 = quantile(i0_chain, [0.025, 0.975])
-
-pγ_post = rate_to_proportion(γ_post)
-R0_post = β_post / pγ_post
-mean_ip = 1 / pγ_post
-println("Parameter Estimates — Wave 3 (all records, posterior means with 95% CI):")
-println("β:      $(round(β_post, digits=3)) [$(round(ci_β[1],digits=3)), $(round(ci_β[2],digits=3))]  (Vossler: 0.235)")
-println("γ:      $(round(γ_post, digits=3)) [$(round(ci_γ[1],digits=3)), $(round(ci_γ[2],digits=3))]  (Vossler: 0.214)")
-println("pγ=1-e⁻ᵞ: $(round(pγ_post, digits=3))")
-println("ρ:      $(round(ρ_post, sigdigits=2)) [$(round(ci_ρ[1],sigdigits=2)), $(round(ci_ρ[2],sigdigits=2))]  (Vossler: 0.0067)")
-println("N:      $(round(N_post, digits=0)) [$(round(ci_N[1],digits=0)), $(round(ci_N[2],digits=0))]")
-println("I₀=ρ·N:  $(round(mean(i0_chain), digits=1)) [$(round(ci_I0[1],digits=1)), $(round(ci_I0[2],digits=1))]  (implied initial infected)")
-println("R₀=β/pγ: $(round(R0_post, digits=3))  (Vossler β/γ: 1.098)")
-println("mean IP=1/pγ: $(round(mean_ip, digits=2)) days  (Vossler 1/γ: 4.7 d)")
+println()
+println("Vossler et al. (2022) Wave 3 reference (continuous-time, β/γ):")
+println("  β = 0.235, γ = 0.214, ρ = 0.0067, β/γ = 1.098, 1/γ = 4.7 d")
 ```
 
 ## Recovery interval fit check
