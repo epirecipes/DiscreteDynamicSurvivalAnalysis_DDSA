@@ -135,7 +135,7 @@ Random.seed!(1234)
 # Data
 
 ``` julia
-df = CSV.read("../hagelloch.csv", DataFrame)
+df = CSV.read("hagelloch.csv", DataFrame)
 
 # CSV.jl return type IDs / class labels as Int
 function _line_list_id(v)
@@ -654,8 +654,8 @@ chain = sample(model_mtheta, gibbs_sampler, MCMCThreads(), n_samples, n_chains;
     Iterations        = 1:1:20000
     Number of chains  = 4
     Samples per chain = 20000
-    Wall duration     = 114.31 seconds
-    Compute duration  = 439.97 seconds
+    Wall duration     = 113.92 seconds
+    Compute duration  = 438.39 seconds
     parameters        = N0, N1, N2, beta_C1, beta_C2, beta_H, beta_G, mean_δ, nb_r
     internals         = logprior, loglikelihood, logjoint
 
@@ -730,8 +730,8 @@ chain_bc = sample(model_boxcar, gibbs_boxcar, MCMCThreads(), n_samples, n_chains
     Iterations        = 1:1:20000
     Number of chains  = 4
     Samples per chain = 20000
-    Wall duration     = 140.78 seconds
-    Compute duration  = 518.58 seconds
+    Wall duration     = 142.32 seconds
+    Compute duration  = 525.31 seconds
     parameters        = N0, N1, N2, beta_C1, beta_C2, beta_H, beta_G, mean_δ, nb_r
     internals         = logprior, loglikelihood, logjoint
 
@@ -780,15 +780,15 @@ chain_bc = sample(model_boxcar, gibbs_boxcar, MCMCThreads(), n_samples, n_chains
       parameters         ess      rhat   ess_per_sec 
           Symbol     Float64   Float64       Float64 
 
-              N0   1086.4295    1.0035        2.4693
-              N1    935.1152    1.0042        2.1254
-              N2   1221.6998    1.0010        2.7768
-         beta_C1    337.5476    1.0187        0.7672
-         beta_C2    223.6748    1.0588        0.5084
-          beta_H    229.6769    1.0920        0.5220
-          beta_G    248.8292    1.0519        0.5656
-          mean_δ   5425.2417    1.0004       12.3309
-            nb_r   7470.9684    1.0003       16.9805
+              N0   1086.4295    1.0035        2.4782
+              N1    935.1152    1.0042        2.1331
+              N2   1221.6998    1.0010        2.7868
+         beta_C1    337.5476    1.0187        0.7700
+         beta_C2    223.6748    1.0588        0.5102
+          beta_H    229.6769    1.0920        0.5239
+          beta_G    248.8292    1.0519        0.5676
+          mean_δ   5425.2417    1.0004       12.3755
+            nb_r   7470.9684    1.0003       17.0420
 
 **Boxcar**
 
@@ -799,32 +799,37 @@ chain_bc = sample(model_boxcar, gibbs_boxcar, MCMCThreads(), n_samples, n_chains
       parameters          ess      rhat   ess_per_sec 
           Symbol      Float64   Float64       Float64 
 
-              N0    1495.5551    1.0033        2.8839
-              N1    1218.8205    1.0054        2.3503
-              N2    1478.8069    1.0014        2.8516
-         beta_C1     383.2430    1.0243        0.7390
-         beta_C2     204.0762    1.0915        0.3935
-          beta_H     242.4354    1.0600        0.4675
-          beta_G     253.8788    1.0587        0.4896
-          mean_δ    5844.4537    1.0002       11.2701
-            nb_r   16027.3532    1.0002       30.9062
+              N0    1495.5551    1.0033        2.8470
+              N1    1218.8205    1.0054        2.3202
+              N2    1478.8069    1.0014        2.8151
+         beta_C1     383.2430    1.0243        0.7296
+         beta_C2     204.0762    1.0915        0.3885
+          beta_H     242.4354    1.0600        0.4615
+          beta_G     253.8788    1.0587        0.4833
+          mean_δ    5844.4537    1.0002       11.1257
+            nb_r   16027.3532    1.0002       30.5103
 
 ## Posterior summaries
 
-GLCT posterior means:
+GLCT posterior medians:
 
-    β_C1  = 0.1273  (within-class 1)
-    β_C2  = 0.0315  (within-class 2)
-    β_H   = 0.0206  (household: school → class 0)
-    β_G   = 0.0598  (global uniform mixing)
+    β_C1 median = 0.1282  (mean 0.1273; within-class 1)
+    β_C2 median = 0.0271  (mean 0.0315; within-class 2)
+    β_H median = 0.0178  (mean 0.0206; household: school → class 0)
+    β_G median = 0.0607  (mean 0.0598; global uniform mixing)
     nb_r  = 4,  nb_p = 0.479 (derived),  mean δ = 8.36 d  (joint NUTS on β's + mean_δ; δ_floor=4),  CV = 0.361
-    N0 = 98 (K0=90, observed K0/N0 at posterior-mean N0 = 0.918)  prior: [90, 99]
-    N1 = 34 (K1=30, observed K1/N1 at posterior-mean N1 = 0.882)  prior: [30, 39]
-    N2 = 77 (K2=68, observed K2/N2 at posterior-mean N2 = 0.883)  prior: [68, 77]
+    N0 = 99 (K0=90)  prior: [90, 99]
+    N1 = 34 (K1=30)  prior: [30, 39]
+    N2 = 77 (K2=68)  prior: [68, 77]
+
+    Observed attack rate K_k/N_k (sample-by-sample, median [95% CI]):
+      K0/N0 = 0.909  [0.909, 0.938]
+      K1/N1 = 0.882  [0.789, 0.968]
+      K2/N2 = 0.883  [0.883, 0.907]
 
     Comparison with Neal and Roberts M_θ structure:
-      β_C1/β_C2 ratio = 4.04  (expect > 1: younger class has higher within-class rate)
-      β_H/β_G ratio   = 0.34  (mean-field β_H diluted over all class-0 × school pairs; expect < 1 vs NR individual-level)
+      β_C1/β_C2 ratio = 4.72  (expect > 1: younger class has higher within-class rate)
+      β_H/β_G ratio   = 0.29  (mean-field β_H diluted over all class-0 × school pairs; expect < 1 vs NR individual-level)
 
 GLCT 95% credible intervals:
 
@@ -839,30 +844,35 @@ GLCT 95% credible intervals:
       N1        : (31, 38)
       N2        : (75, 77)
 
-Boxcar posterior means:
+Boxcar posterior medians:
 
-    β_C1  = 0.1244
-    β_C2  = 0.0293
-    β_H   = 0.0209
-    β_G   = 0.0603
+    β_C1  = 0.1235
+    β_C2  = 0.0255
+    β_H   = 0.018
+    β_G   = 0.0614
     nb_r  = 4,  nb_p = 0.479,  mean δ = 8.35 d
-    N0 = 98  (K0=90, observed K0/N0 at posterior-mean N0 = 0.918)
-    N1 = 34  (K1=30, observed K1/N1 at posterior-mean N1 = 0.882)
-    N2 = 77  (K2=68, observed K2/N2 at posterior-mean N2 = 0.883)
+    N0 = 99  (K0=90)
+    N1 = 34  (K1=30)
+    N2 = 77  (K2=68)
 
-The table below displays the posterior means for all parameters, and
+    Observed attack rate K_k/N_k (sample-by-sample, median [95% CI]):
+      K0/N0 = 0.909  [0.909, 0.938]
+      K1/N1 = 0.882  [0.769, 0.968]
+      K2/N2 = 0.883  [0.883, 0.919]
+
+The table below displays the posterior medians for all parameters, and
 both GLCT and Boxcar maps should recover essentially the same parameter
 values.
 
     Parameter     GLCT          Boxcar
     ------------------------------------------
-    β_C1          0.1273        0.1244
-    β_C2          0.0315        0.0293
-    β_H           0.0206        0.0209
-    β_G           0.0598        0.0603
-    mean δ        8.3618        8.3541
-    nb_p          0.4787        0.4791
-    N0            98.0          98.0
+    β_C1          0.1282        0.1235
+    β_C2          0.0271        0.0255
+    β_H           0.0178        0.018
+    β_G           0.0607        0.0614
+    mean δ        8.3572        8.3471
+    nb_p          0.4786        0.4792
+    N0            99.0          99.0
     N1            34.0          34.0
     N2            77.0          77.0
 
@@ -893,8 +903,8 @@ $(N_i/N_j) \times \beta_{ij} \times \mathrm{mean\_ip}$, with the
 $N_i/N_j$ factor arising because the model state variables are per-group
 fractions (one infected in group $j$ corresponds to fraction $1/N_j$).
 
-      GLCT:   mean = 2.187  95% CI = (2.024, 2.389)
-      Boxcar: mean = 2.179  95% CI = (2.021, 2.377)
+      GLCT:   median = 2.18  95% CI = (2.024, 2.389)
+      Boxcar: median = 2.171  95% CI = (2.021, 2.377)
 
 ## Posterior predictive checks
 
@@ -1037,7 +1047,7 @@ potential pairs), and transmission not attributed to $\beta_H$ is
 absorbed by $\beta_G$.
 
     Population treatment (all three N inferred via Binomial final-size):
-      N0 = 98 [90, 99]  →  K0=90/N0=98 = 91.8%
+      N0 = 99 [90, 99]  →  K0=90/N0=99 = 90.9%
       N1 = 34 [30, 39]  →  K1=30/N1=34 = 88.2%
       N2 = 77 [68, 77]  →  K2=68/N2=77 = 88.3%
       (NR n=m=188 implies 100% attack rate; DDSA infers from data within census bounds)
@@ -1069,9 +1079,9 @@ transmission. A hard upper bound on $r$ can make residual marginal
 misfit interpretable as a model-class limit rather than as precise
 identification of $r$, but the fit is still consistent with the data.
 
-    Class 0:  K=90,  N=98 [96, 99]  observed K/N at posterior-mean N=0.918  model-implied posterior τ=0.772  [0.716, 0.83]
-    Class 1:  K=30,  N=34 [31, 38]  observed K/N at posterior-mean N=0.882  model-implied posterior τ=0.882  [0.822, 0.919]
-    Class 2:  K=68,  N=77 [75, 77]  observed K/N at posterior-mean N=0.883  model-implied posterior τ=0.742  [0.668, 0.803]
+    Class 0:  K=90,  N=99 [96, 99]  K/N (median [95% CI]) = 0.909 [0.909, 0.938]  model-implied τ = 0.772 [0.716, 0.83]
+    Class 1:  K=30,  N=34 [31, 38]  K/N (median [95% CI]) = 0.882 [0.789, 0.968]  model-implied τ = 0.884 [0.822, 0.919]
+    Class 2:  K=68,  N=77 [75, 77]  K/N (median [95% CI]) = 0.883 [0.883, 0.907]  model-implied τ = 0.744 [0.668, 0.803]
 
 In the observed data, Class 1 infection times cluster around days 21–28
 while Class 2’s main wave spans days 26–40, so
@@ -1100,7 +1110,8 @@ $P(\beta_{C1}>\beta_{C2}) = 0.994$. It also identifies a positive
 household transmission route ($\beta_H > 0$), which characterises the
 pre-school epidemic as a secondary wave following the school outbreak,
 and gives consistent reproduction-number estimates between
-implementations (GLCT $R_0 \approx 2.187$ vs Boxcar
-$R_0 \approx 2.179$). Although the model underpredicts attack rates for
-certain classes due to aggregating heterogeneous contact structure into
-mean-field terms, these results do not alter the directional findings.
+implementations (GLCT $R_0 = 2.18$, 95% CI $[2.02,\,2.39]$ vs. Boxcar
+$R_0 = 2.17$, 95% CI $[2.02,\,2.38]$, both posterior medians). Although
+the model underpredicts attack rates for certain classes due to
+aggregating heterogeneous contact structure into mean-field terms, these
+results do not alter the directional findings.

@@ -107,7 +107,7 @@ Random.seed!(1234)
 #| echo: true
 #| output: false
 
-df = CSV.read("../hagelloch.csv", DataFrame)
+df = CSV.read("hagelloch.csv", DataFrame)
 
 # CSV.jl return type IDs / class labels as Int
 function _line_list_id(v)
@@ -725,41 +725,56 @@ ess_rhat_bc
 
 ## Posterior summaries
 
-GLCT posterior means:
+GLCT posterior medians:
 ```{julia}
 #| echo: false
 #| output: true
 
-β_C1_m   = mean(vec(chain[:beta_C1]))
-β_C2_m   = mean(vec(chain[:beta_C2]))
-β_H_m    = mean(vec(chain[:beta_H]))
-β_G_m    = mean(vec(chain[:beta_G]))
+bc1_v    = vec(chain[:beta_C1])
+bc2_v    = vec(chain[:beta_C2])
+bh_v     = vec(chain[:beta_H])
+bg_v     = vec(chain[:beta_G])
 mδ_v     = vec(chain[:mean_δ])
 nr_vi    = vec(chain[:nb_r])
+n0_v     = vec(chain[:N0])
+n1_v     = vec(chain[:N1])
+n2_v     = vec(chain[:N2])
 np_v     = nr_vi ./ (mδ_v .- δ_floor_ip .+ nr_vi)
-nb_r_m   = round(Int, mean(nr_vi))
-nb_p_m   = mean(np_v)
-mean_ip_m = mean(mδ_v)
-N0_m     = round(Int, mean(vec(chain[:N0])))
-N1_m     = round(Int, mean(vec(chain[:N1])))
-N2_m     = round(Int, mean(vec(chain[:N2])))
+
+# Per-group attack-rate posteriors: K_k is observed; N_k is inferred.
+τ0_obs_v = K0 ./ n0_v
+τ1_obs_v = K1 ./ n1_v
+τ2_obs_v = K2 ./ n2_v
+
+β_C1_m   = median(bc1_v)
+β_C2_m   = median(bc2_v)
+β_H_m    = median(bh_v)
+β_G_m    = median(bg_v)
+nb_r_m   = round(Int, median(nr_vi))
+nb_p_m   = median(np_v)
+mean_ip_m = median(mδ_v)
+N0_m     = round(Int, median(n0_v))
+N1_m     = round(Int, median(n1_v))
+N2_m     = round(Int, median(n2_v))
 
 dph_post = PhaseTypeDistributions.dph_negative_binomial_min_support(nb_r_m, nb_p_m, δ_floor_ip)
 cv_m     = sqrt(PhaseTypeDistributions.var(dph_post)) / PhaseTypeDistributions.mean(dph_post)
 
-println("β_C1  = $(round(β_C1_m,  digits=4))  (within-class 1)")
-println("β_C2  = $(round(β_C2_m,  digits=4))  (within-class 2)")
-println("β_H   = $(round(β_H_m,   digits=4))  (household: school → class 0)")
-println("β_G   = $(round(β_G_m,   digits=4))  (global uniform mixing)")
+println("β_C1 median = $(round(β_C1_m,  digits=4))  (mean $(round(mean(bc1_v), digits=4)); within-class 1)")
+println("β_C2 median = $(round(β_C2_m,  digits=4))  (mean $(round(mean(bc2_v), digits=4)); within-class 2)")
+println("β_H median = $(round(β_H_m,   digits=4))  (mean $(round(mean(bh_v),  digits=4)); household: school → class 0)")
+println("β_G median = $(round(β_G_m,   digits=4))  (mean $(round(mean(bg_v),  digits=4)); global uniform mixing)")
 println("nb_r  = $nb_r_m,  nb_p = $(round(nb_p_m, digits=3)) (derived),  " *
         "mean δ = $(round(mean_ip_m, digits=2)) d  " *
         "(joint NUTS on β's + mean_δ; δ_floor=$δ_floor_ip),  CV = $(round(cv_m, digits=3))")
-println("N0 = $N0_m (K0=$K0, observed K0/N0 at posterior-mean N0 = $(round(K0/N0_m,digits=3)))" *
-        "  prior: [$K0, $N0_max]")
-println("N1 = $N1_m (K1=$K1, observed K1/N1 at posterior-mean N1 = $(round(K1/N1_m,digits=3)))" *
-        "  prior: [$K1, $N1_max]")
-println("N2 = $N2_m (K2=$K2, observed K2/N2 at posterior-mean N2 = $(round(K2/N2_m,digits=3)))" *
-        "  prior: [$K2, $N2_max]")
+println("N0 = $N0_m (K0=$K0)  prior: [$K0, $N0_max]")
+println("N1 = $N1_m (K1=$K1)  prior: [$K1, $N1_max]")
+println("N2 = $N2_m (K2=$K2)  prior: [$K2, $N2_max]")
+println()
+println("Observed attack rate K_k/N_k (sample-by-sample, median [95% CI]):")
+println("  K0/N0 = $(round(median(τ0_obs_v), digits=3))  [$(round(quantile(τ0_obs_v, 0.025), digits=3)), $(round(quantile(τ0_obs_v, 0.975), digits=3))]")
+println("  K1/N1 = $(round(median(τ1_obs_v), digits=3))  [$(round(quantile(τ1_obs_v, 0.025), digits=3)), $(round(quantile(τ1_obs_v, 0.975), digits=3))]")
+println("  K2/N2 = $(round(median(τ2_obs_v), digits=3))  [$(round(quantile(τ2_obs_v, 0.025), digits=3)), $(round(quantile(τ2_obs_v, 0.975), digits=3))]")
 println()
 println("Comparison with Neal and Roberts M_θ structure:")
 println("  β_C1/β_C2 ratio = $(round(β_C1_m/β_C2_m, digits=2))  " *
@@ -787,36 +802,54 @@ for (p, label) in [(:nb_r, "nb_r"), (:N0, "N0"), (:N1, "N1"), (:N2, "N2")]
 end
 ```
 
-Boxcar posterior means:
+Boxcar posterior medians:
 ```{julia}
 #| echo: false
 #| output: true
 
-bc1_bc     = mean(vec(chain_bc[:beta_C1]))
-bc2_bc     = mean(vec(chain_bc[:beta_C2]))
-bh_bc      = mean(vec(chain_bc[:beta_H]))
-bg_bc      = mean(vec(chain_bc[:beta_G]))
+bc1_bc_v   = vec(chain_bc[:beta_C1])
+bc2_bc_v   = vec(chain_bc[:beta_C2])
+bh_bc_v    = vec(chain_bc[:beta_H])
+bg_bc_v    = vec(chain_bc[:beta_G])
 mδ_bc_v    = vec(chain_bc[:mean_δ])
 nr_bc_v    = vec(chain_bc[:nb_r])
+n0_bc_v    = vec(chain_bc[:N0])
+n1_bc_v    = vec(chain_bc[:N1])
+n2_bc_v    = vec(chain_bc[:N2])
 np_bc_v    = nr_bc_v ./ (mδ_bc_v .- δ_floor_ip .+ nr_bc_v)
-mean_ip_bc = mean(mδ_bc_v)
-N0_bc      = round(Int, mean(vec(chain_bc[:N0])))
-N1_bc      = round(Int, mean(vec(chain_bc[:N1])))
-N2_bc      = round(Int, mean(vec(chain_bc[:N2])))
+
+# Per-group attack-rate posteriors for the Boxcar model
+τ0_obs_bc_v = K0 ./ n0_bc_v
+τ1_obs_bc_v = K1 ./ n1_bc_v
+τ2_obs_bc_v = K2 ./ n2_bc_v
+
+bc1_bc     = median(bc1_bc_v)
+bc2_bc     = median(bc2_bc_v)
+bh_bc      = median(bh_bc_v)
+bg_bc      = median(bg_bc_v)
+mean_ip_bc = median(mδ_bc_v)
+N0_bc      = round(Int, median(n0_bc_v))
+N1_bc      = round(Int, median(n1_bc_v))
+N2_bc      = round(Int, median(n2_bc_v))
 
 println("β_C1  = $(round(bc1_bc,  digits=4))")
 println("β_C2  = $(round(bc2_bc,  digits=4))")
 println("β_H   = $(round(bh_bc,   digits=4))")
 println("β_G   = $(round(bg_bc,   digits=4))")
-println("nb_r  = $(round(Int, mean(nr_bc_v))),  " *
-        "nb_p = $(round(mean(np_bc_v), digits=3)),  " *
+println("nb_r  = $(round(Int, median(nr_bc_v))),  " *
+        "nb_p = $(round(median(np_bc_v), digits=3)),  " *
         "mean δ = $(round(mean_ip_bc, digits=2)) d")
-println("N0 = $N0_bc  (K0=$K0, observed K0/N0 at posterior-mean N0 = $(round(K0/N0_bc,digits=3)))")
-println("N1 = $N1_bc  (K1=$K1, observed K1/N1 at posterior-mean N1 = $(round(K1/N1_bc,digits=3)))")
-println("N2 = $N2_bc  (K2=$K2, observed K2/N2 at posterior-mean N2 = $(round(K2/N2_bc,digits=3)))")
+println("N0 = $N0_bc  (K0=$K0)")
+println("N1 = $N1_bc  (K1=$K1)")
+println("N2 = $N2_bc  (K2=$K2)")
+println()
+println("Observed attack rate K_k/N_k (sample-by-sample, median [95% CI]):")
+println("  K0/N0 = $(round(median(τ0_obs_bc_v), digits=3))  [$(round(quantile(τ0_obs_bc_v, 0.025), digits=3)), $(round(quantile(τ0_obs_bc_v, 0.975), digits=3))]")
+println("  K1/N1 = $(round(median(τ1_obs_bc_v), digits=3))  [$(round(quantile(τ1_obs_bc_v, 0.025), digits=3)), $(round(quantile(τ1_obs_bc_v, 0.975), digits=3))]")
+println("  K2/N2 = $(round(median(τ2_obs_bc_v), digits=3))  [$(round(quantile(τ2_obs_bc_v, 0.025), digits=3)), $(round(quantile(τ2_obs_bc_v, 0.975), digits=3))]")
 ```
 
-The table below displays the posterior means for all parameters, and both GLCT and Boxcar maps should recover essentially the same parameter values.
+The table below displays the posterior medians for all parameters, and both GLCT and Boxcar maps should recover essentially the same parameter values.
 
 ```{julia}
 #| echo: false
@@ -830,7 +863,7 @@ for (lbl, dv, bv) in [
         ("β_H",    β_H_m,         bh_bc),
         ("β_G",    β_G_m,         bg_bc),
         ("mean δ", mean_ip_m,     mean_ip_bc),
-        ("nb_p",   nb_p_m,        mean(np_bc_v)),
+        ("nb_p",   nb_p_m,        median(np_bc_v)),
         ("N0",     Float64(N0_m), Float64(N0_bc)),
         ("N1",     Float64(N1_m), Float64(N1_bc)),
         ("N2",     Float64(N2_m), Float64(N2_bc))]
@@ -906,18 +939,18 @@ R0_bc_v = [compute_R0_mtheta(
                 round(Int, vec(chain_bc[:N2])[i]))
            for i in eachindex(vec(chain_bc[:beta_C1]))]
 
-R0_glct_mean = round(mean(R0_samples), digits=3)
+R0_glct_med  = round(median(R0_samples), digits=3)
 R0_glct_lo   = round(quantile(R0_samples, 0.025), digits=3)
 R0_glct_hi   = round(quantile(R0_samples, 0.975), digits=3)
 
-R0_box_mean  = round(mean(R0_bc_v), digits=3)
+R0_box_med   = round(median(R0_bc_v), digits=3)
 R0_box_lo    = round(quantile(R0_bc_v, 0.025), digits=3)
 R0_box_hi    = round(quantile(R0_bc_v, 0.975), digits=3)
 
-R0_mean_diff = round(abs(R0_glct_mean - R0_box_mean), digits=3)
+R0_med_diff  = round(abs(R0_glct_med - R0_box_med), digits=3)
 
-println("  GLCT:   mean = $(R0_glct_mean)  95% CI = ($(R0_glct_lo), $(R0_glct_hi))")
-println("  Boxcar: mean = $(R0_box_mean)  95% CI = ($(R0_box_lo), $(R0_box_hi))")
+println("  GLCT:   median = $(R0_glct_med)  95% CI = ($(R0_glct_lo), $(R0_glct_hi))")
+println("  Boxcar: median = $(R0_box_med)  95% CI = ($(R0_box_lo), $(R0_box_hi))")
 ```
 
 ## Posterior predictive checks
@@ -1132,11 +1165,15 @@ for (label, K, N_m, post, sym) in [
         ("Class 0", K0, N0_m, τ0_post, :N0),
         ("Class 1", K1, N1_m, τ1_post, :N1),
         ("Class 2", K2, N2_m, τ2_post, :N2)]
-    N_ci_lo = round(Int, q025(vec(chain[sym])))
-    N_ci_hi = round(Int, q975(vec(chain[sym])))
+    N_v     = vec(chain[sym])
+    N_ci_lo = round(Int, q025(N_v))
+    N_ci_hi = round(Int, q975(N_v))
+    # K/N is a posterior variable (K observed, N inferred)sample-by-sample CI
+    τ_obs_v = K ./ N_v
     println("$label:  K=$K,  N=$(N_m) [$(N_ci_lo), $(N_ci_hi)]  " *
-            "observed K/N at posterior-mean N=$(round(K/N_m,digits=3))  " *
-            "model-implied posterior τ=$(round(mean(post),digits=3))  " *
+            "K/N (median [95% CI]) = $(round(median(τ_obs_v),digits=3)) " *
+            "[$(round(q025(τ_obs_v),digits=3)), $(round(q975(τ_obs_v),digits=3))]  " *
+            "model-implied τ = $(round(median(post),digits=3)) " *
             "[$(round(q025(post),digits=3)), $(round(q975(post),digits=3))]")
 end
 ```
@@ -1159,4 +1196,4 @@ println("P(Class 0 peaks after Class 1) = $(round(mean(peak0 .>= peak1), digits=
 println("  → expected near 1: pre-school wave is driven by household transmission from school children")
 ```
 
-In sum, both GLCT and Boxcar implementations produce consistent posteriors across all parameters, confirming that the two formulations are equivalent. Convergence is clean for $\beta_{C1}$ ($\hat{R} \approx 1.01$--$1.03$ across the two implementations) but remains only marginal for $\beta_{C2}$, $\beta_H$, and $\beta_G$ ($\hat{R} \approx 1.05$--$1.09$), reflecting the limited identifiability of the household and global terms under mean-field contact structure. Despite this, the model captures the primary qualitative dynamics by recovering a higher transmission rate in the younger school class compared to the older class with posterior probability $P(\beta_{C1}>\beta_{C2}) = 0.994$. It also identifies a positive household transmission route ($\beta_H > 0$), which characterises the pre-school epidemic as a secondary wave following the school outbreak, and gives consistent reproduction-number estimates between implementations (GLCT $R_0 \approx 2.187$ vs Boxcar $R_0 \approx 2.179$). Although the model underpredicts attack rates for certain classes due to aggregating heterogeneous contact structure into mean-field terms, these results do not alter the directional findings.
+In sum, both GLCT and Boxcar implementations produce consistent posteriors across all parameters, confirming that the two formulations are equivalent. Convergence is clean for $\beta_{C1}$ ($\hat{R} \approx 1.01$--$1.03$ across the two implementations) but remains only marginal for $\beta_{C2}$, $\beta_H$, and $\beta_G$ ($\hat{R} \approx 1.05$--$1.09$), reflecting the limited identifiability of the household and global terms under mean-field contact structure. Despite this, the model captures the primary qualitative dynamics by recovering a higher transmission rate in the younger school class compared to the older class with posterior probability $P(\beta_{C1}>\beta_{C2}) = 0.994$. It also identifies a positive household transmission route ($\beta_H > 0$), which characterises the pre-school epidemic as a secondary wave following the school outbreak, and gives consistent reproduction-number estimates between implementations (GLCT $R_0 = 2.18$, 95\% CI $[2.02,\,2.39]$ vs.\ Boxcar $R_0 = 2.17$, 95\% CI $[2.02,\,2.38]$, both posterior medians). Although the model underpredicts attack rates for certain classes due to aggregating heterogeneous contact structure into mean-field terms, these results do not alter the directional findings.
