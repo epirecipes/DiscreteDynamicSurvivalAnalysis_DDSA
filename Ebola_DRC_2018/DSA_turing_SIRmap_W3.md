@@ -322,8 +322,8 @@ describe(chain)
     Iterations        = 501:1:5500
     Number of chains  = 4
     Samples per chain = 5000
-    Wall duration     = 800.15 seconds
-    Compute duration  = 2541.39 seconds
+    Wall duration     = 795.27 seconds
+    Compute duration  = 2531.18 seconds
     parameters        = β, γ, ρ, N_float
     internals         = n_steps, is_accept, acceptance_rate, log_density, hamiltonian_energy, hamiltonian_energy_error, max_hamiltonian_energy_error, tree_depth, numerical_error, step_size, nom_step_size, lp, logprior, loglikelihood
 
@@ -486,8 +486,9 @@ for (idx, i) in enumerate(sample_idx)
     _, _, f_i = simulate(chain[:β][i], chain[:γ][i], chain[:ρ][i], nsteps)
     f_samples[:, idx] = f_i
 end
-f_lower = [quantile(f_samples[t, :], 0.025) for t in 1:nsteps]
-f_upper = [quantile(f_samples[t, :], 0.975) for t in 1:nsteps]
+f_median = [quantile(f_samples[t, :], 0.5)   for t in 1:nsteps]
+f_lower  = [quantile(f_samples[t, :], 0.025) for t in 1:nsteps]
+f_upper  = [quantile(f_samples[t, :], 0.975) for t in 1:nsteps]
 
 p1 = plot(1:nsteps, th_onset ./ K_onset,
           label="Observed (onset-known)",
@@ -496,8 +497,8 @@ p1 = plot(1:nsteps, th_onset ./ K_onset,
           linewidth=2, marker=:circle, markersize=3)
 plot!(p1, 1:nsteps, f_lower,
       fillrange=f_upper, fillalpha=0.3, fillcolor=:orange,
-      linecolor=:orange, label="95% CI", linewidth=0)
-plot!(p1, 1:nsteps, f, label="Posterior mean", linewidth=3, color=:red)
+      linecolor=:orange, label="95% CrI", linewidth=0)
+plot!(p1, 1:nsteps, f_median, label="Posterior median", linewidth=3, color=:red)
 plot(p1, size=(800, 500))
 ```
 
