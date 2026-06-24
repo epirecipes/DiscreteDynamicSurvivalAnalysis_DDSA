@@ -19,7 +19,7 @@ julia:
 
 # Overview
 
-This notebook contrasts discrete dynamic survival analysis (DDSA) with the familiar workflow of fitting a deterministic compartmental ODE to aggregated daily counts under a Poisson or Negative-Binomial observation model (see the [epirecipes notebook](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_turing/ode_turing.md)).
+This notebook contrasts discrete dynamic survival analysis (DDSA) with fitting a deterministic compartmental ODE to aggregated daily counts under a Poisson or Negative-Binomial observation model (see the [epirecipes notebook](https://github.com/epirecipes/sir-julia/blob/master/markdown/ode_turing/ode_turing.md)).
 
 Epidemiological data can be presented as a line list of onset and recovery events. A common path aggregates those events into a daily incidence curve and fits a continuous-time ODE, evaluating the solution at integer days. DDSA is built in discrete time and uses the line list directly.
 
@@ -33,7 +33,7 @@ To compare the two approaches, we generate a synthetic outbreak with a known non
 | 4. ODE, $\gamma$ fixed | Continuous SIR ODE | Exponential (single $I$), *assumed* | $\gamma$ *fixed* from literature ($\mu=4$ d) | Negative-Binomial on daily counts |
 | 5. DDSA | Discrete GLCT map | Discrete phase-type (NegBin), *inferred* (shape $r$) | mean IP *inferred* | Multinomial onsets, phase-type recovery intervals, Binomial final size |
 
-The four ODE comparators represent realistic practitioner choices when only an incidence curve is available. Models 1 and 2 are the default workflow: fit a standard exponential SIR ODE to daily counts, with Poisson or Negative-Binomial noise. Model 3 represents a practitioner who suspects a non-exponential IP (for example, from qualitative knowledge that the infectious period is less variable than the exponential) and uses a staged ODE to reflect this, but still leaves $\gamma$ free because no reliable external estimate exists. Model 4 represents the common practice of anchoring the IP mean from prior literature — fixing $\gamma$ at a published estimate — while retaining the default exponential shape. DDSA (Model 5) represents the alternative when individual-level records are available: the line list supplies recovery intervals that make joint inference of IP shape and mean possible, without external assumptions.
+The four ODE comparators represent realistic practitioner choices when only an incidence curve is available. Models 1 and 2 are the default workflow: fit a standard exponential SIR ODE to daily counts, with Poisson or Negative-Binomial noise. Model 3 represents a practitioner who suspects a non-exponential IP (for example, from qualitative knowledge that the infectious period is less variable than the exponential) and uses a staged ODE to reflect this, but still leaves $\gamma$ free because no reliable external estimate exists. Model 4 represents one approach of anchoring the IP mean from prior literature — fixing $\gamma$ at a published estimate — while retaining the default exponential shape. DDSA (Model 5) represents the alternative when individual-level records are available: the line list supplies recovery intervals that make joint inference of IP shape and mean possible, without external assumptions.
 
 This comparison illustrates specific instances rather than suggesting a best practice recipe. ODE models can use any integrator or count observation model. DDSA is similarly modular, the recovery term can be any discrete phase-type distribution (geometric, NegBin/DPH, boxcar) with shape fixed or inferred, and onset or final-size terms can be dropped when those records are unavailable.
 
@@ -128,8 +128,12 @@ end
     τ_valid = clamp(result.τ, 0.001, 0.999)
     f_safe  = safe_normalise(result.f, nsteps)
     K ~ Binomial(N, τ_valid)
-    if K > 0 && all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
-        th ~ Multinomial(K, f_safe)
+    if K > 0
+        if all(x -> isfinite(x) && !isnan(x), f_safe) && abs(sum(f_safe) - 1) < 0.01
+            th ~ Multinomial(K, f_safe)
+        else
+            Turing.@addlogprob! -Inf
+        end
     end
     for i in 1:(M + K)
         delta[i] ~ dph
@@ -244,13 +248,13 @@ end
 end
 ```
 
-# Why the two paradigms agree on infection timing
+# Infection Timing Equivalence
 
-The count likelihood and DDSA align more closely than it first appears. Independent Poisson daily counts, conditioned on their total $K$, are exactly $\mathrm{Multinomial}(K,f)$, just like DDSA's infection-time term. The count--Poisson log-likelihood therefore factorises as
+Independent Poisson daily counts, conditioned on their total $K$, follow a $\mathrm{Multinomial}(K,f)$ distribution—identical to the infection-time term in DDSA. The count–Poisson log-likelihood therefore factorises as
 
 $$\sum_t \log\mathrm{Pois}(y_t;\mu_t) \;=\; \underbrace{\log\mathrm{Multinomial}(y;K,f)}_{\text{DDSA infection-time term}} \;+\; \underbrace{\log\mathrm{Pois}\!\left(K;\textstyle\sum_t\mu_t\right)}_{\text{final-size term}}, \qquad f_t = \mu_t / \textstyle\sum_s\mu_s .$$
 
-DDSA keeps the multinomial timing term, swaps the Poisson final-size factor for $\mathrm{Binomial}(N,\tau)$—the natural counterpart when the at-risk population $N$ is known—and adds a recovery-interval term that aggregated counts cannot represent. Under Poisson noise, a correctly specified infectious period, and large $N$, the two approaches agree on infection timing. They diverge where the line list carries extra information: individual recovery durations (identifying IP mean and shape) and a tighter small-$N$ final-size constraint. For the ODE comparator, $\mu_t$ comes from a continuous solve sampled at integer days, so its timing PMF $f$ matches DDSA's only up to discretisation. The chunk below verifies the factorisation on the exponential ODE's mean curve at the generative truth:
+DDSA uses this multinomial timing term but replaces the Poisson final-size factor with $\mathrm{Binomial}(N,\tau)$ to explicitly account for a known at-risk population $N$. It also introduces a recovery-interval term that aggregated counts cannot capture. Assuming Poisson noise, a correctly specified infectious period, and large $N$, both approaches yield consistent infection timing. They diverge only when the line list provides higher-resolution data: individual recovery durations (which identify the IP mean and shape) and tighter small-$N$ final-size constraints. For the ODE model, $\mu_t$ is sampled from a continuous solution at integer days, so its timing PMF $f$ matches DDSA's only up to discretisation error. The following Julia implementation demonstrates this factorisation on the exponential ODE's mean curve:
 
 ```{julia}
 #| label: equivalence
@@ -270,9 +274,9 @@ println("timing + final size                = ", round(ll_multi + ll_total, digi
 println("identity holds: ", isapprox(ll_pois, ll_multi + ll_total; atol=1e-6))
 ```
 
-# Fit all five
+# Fitting all models
 
-For the three $\gamma$-free count models we use high target-accept / deep-tree NUTS settings to clear divergences on the weak $\beta$--$\gamma$ ridge, so that wide posteriors reflect weak identifiability rather than sampler failure. The $\gamma$-fixed model is well behaved and uses milder NUTS. DDSA mixes discrete shape $r$ (Metropolis--Hastings) with NUTS on $(\beta,\rho,p)$.
+All five models are sampled with 2000 warm-up and 2000 posterior draws. The three $\gamma$-free count models use NUTS with target acceptance 0.95 and `max_depth` 12. The $\gamma$-fixed model uses standard NUTS (target acceptance 0.8). DDSA uses a Gibbs scheme: Metropolis--Hastings for the discrete shape $r$ and NUTS on $(\beta, \rho, p)$.
 
 ```{julia}
 #| label: fit
@@ -296,9 +300,9 @@ ch_ddsa = sample(dph_full(N, 1, nsteps, K, th, delta, nb_r_max, Δt), gibbs, n_p
                  initial_params = init, progress=false)
 ```
 
-# Results: derived quantities, convergence, prior reference
+# Results
 
-The section below displays convergence diagnostics ($\hat R$, ESS, divergences) and posterior medians with 95% credible intervals for $\beta$, mean IP, and $R_0$ by model.
+Convergence diagnostics ($\hat R$, ESS, divergences) and posterior medians with 95% credible intervals for $\beta$, mean IP, and $R_0$ are reported by model.
 
 ```{julia}
 #| label: summary
@@ -340,9 +344,9 @@ println("DDSA (line list):         β=$(q(βd))  meanIP=$(q(ipd))  R0=$(q(R0d)) 
 
 # Figure
 
-Panel **(A)** overlays observed daily incidence (grey bars) with posterior-predictive medians; 95% bands are shown only for the exponential-NegBin ODE and DDSA to limit clutter. All models track the incidence curve equally well — the shared count data do not discriminate among them. Panels **(B)** and **(C)** show posterior densities for $R_0$ and mean infectious period; the dotted grey curve in (B) is the prior, and black dashed lines mark the generative truth ($R_0=3.16$, mean IP $=6.33$ d).
+Panel (A) shows observed daily incidence with posterior-predictive medians and 95% bands for the exponential-NegBin ODE and DDSA. All five models fit the incidence curve similarly. Panels (B) and (C) show posterior densities for $R_0$ and mean infectious period, with the prior (dotted) and true values (dashed) indicated.
 
-In (B), $\gamma$-free count posteriors (blue, purple) stay broad — near or overlapping the prior — reflecting the unresolved $\beta$--$\gamma$ ridge. The $\gamma$-fixed ODE (green) narrows the posterior but is biased downward: fixing $\gamma$ at the assumed continuous-time mean ($\mu=4$ d) overestimates the removal rate relative to the effective discrete IP, so the inferred $R_0 = \hat\beta/\gamma_{\mathrm{fix}}$ undershoots the truth. Only DDSA (red) concentrates near the truth. In (C), only DDSA recovers the mean IP from data (model 4 not shown as it has no IP posterior).
+The count models with $\gamma$ free (blue, purple) return posteriors covering nearly the full prior range. The width is similar whether or not the infectious period is correctly staged, suggesting the incidence curve provides limited joint information on $\beta$ and $\gamma$. Fixing $\gamma$ (green) concentrates the $R_0$ posterior but shifts it below the truth: the continuous-time rate $\gamma=1/4$ overestimates the removal rate relative to the effective discrete infectious period of 6.33 d. DDSA (red), informed by the individual recovery intervals, recovers both $R_0$ and the mean infectious period without fixing either.
 
 ```{julia}
 #| label: fig-ddsa-vs-ode
@@ -410,11 +414,8 @@ fig
 
 # Discussion
 
-When only an incidence curve is available, ODE count models are appropriate. For infection timing, they are closely related to DDSA: a Poisson count likelihood conditioned on its total is exactly DDSA's multinomial onset term. Looking at panel (A), all five models produce posterior predictive curves that cover the observed incidence (the count data alone do not discriminate among them). Panels (B) and (C) reveal what each practitioner choice does and does not recover.
+Count likelihoods and DDSA share the same infection-timing information: a Poisson count likelihood conditioned on its total is exactly DDSA's multinomial onset term. All five models fit the incidence curve comparably, so the differences between them lie not in goodness of fit but in what each recovers about the underlying epidemic parameters.
 
-- Models 1--2 (Poisson and NegBin, $\gamma$ free): $R_0$ posteriors in panel (B) are broad and overlap the prior, reflecting weak joint identifiability of $\beta$ and $\gamma$ from counts alone. The mean IP posterior in panel (C) is equally diffuse. 
-- Model 3 (staged ODE, $\gamma$ free): a practitioner who suspects a non-exponential IP and uses the correctly staged model still cannot identify the IP mean, the purple curve in panel (B) remains diffuse.
-- Model 4 (exponential, $\gamma$ fixed from literature): anchoring $\gamma$ at the assumed continuous-time mean IP of 4 d narrows the $R_0$ posterior, but the 95\% CrI lies below truth. Fixing $\gamma = 1/4$ overestimates the removal rate relative to the effective discrete IP of 6.33 d, so the inferred $R_0 = \hat\beta / \gamma_{\mathrm{fix}}$ is too small even as $\hat\beta$ rises to fit the epidemic curve. This bias would persist undetected without access to individual recovery times.
-- Model 5 (DDSA): $R_0$ and mean IP both concentrate near the truth in panels (B) and (C), inferred jointly from the line list without fixing any IP parameter externally.
+Count models with $\gamma$ free (Models 1--3) return posteriors covering much of the prior for both $R_0$ and the mean IP; this holds whether or not the infectious period is correctly staged. Fixing $\gamma$ from the literature (Model 4) narrows the $R_0$ posterior but introduces a downward bias: the continuous-time rate $\gamma=1/4$ overestimates removal relative to the effective discrete IP of 6.33 d, so the inferred $R_0 = \hat\beta/\gamma_{\mathrm{fix}}$ undershoots the truth even as $\hat\beta$ adjusts upward to fit the incidence curve. This bias was not apparent from incidence data in this example. DDSA (Model 5), using the same incidence together with recovery intervals and final size, recovers $R_0$, mean IP, and dwell-time shape without fixing any IP parameter externally.
 
-Both aggregated counts and individual line lists provide useful information about an outbreak. When only daily incidence is available, count models are the natural tool. They fit the epidemic curve well and are easy to specify. When a line list is also available, DDSA can additionally recover the infectious-period distribution from individual recovery times, identifying both the mean IP and its shape without external assumptions. The practical consequence, illustrated by Model 4, is that shape misspecification introduces R₀ bias that incidence data alone cannot reveal.
+When only daily incidence is available, count models can be the natural choice. When a line list is also available, the recovery intervals provide information that aggregated counts cannot: they can help identify both the mean IP and its shape, and may reveal biases introduced by external IP assumptions that are difficult to detect from incidence data alone.
