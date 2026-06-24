@@ -147,7 +147,7 @@ We simulate an Erlang-4 outbreak with $\beta=0.5$/step, $N=99$, $\rho=1/N$ (one 
 
 ```{julia}
 #| label: truth
-#| output: true
+#| output: false
 N_pop   = 99
 R0_cal, μ_ip, k, Δt = 2.0, 4.0, 4, 1.0
 ρ_true  = 1.0 / N_pop
@@ -161,6 +161,11 @@ data  = generate_discrete_glct_data(β_true, dph_nom.S, dph_nom.α, ρ_true, N_p
 K, th, delta = data[:K], data[:th], data[:delta]
 N = N_pop
 incidence = th
+```
+
+```{julia}
+#| echo: false
+#| output: true
 println("Truth: β=$β_true, E[W]=$(round(EW,digits=2)) d, R0_imp=$(round(R0_imp,digits=2)), R0_cont=$(R0_cal)")
 println("Obs:   K=$K, attack=$(round(K/N,digits=3)), recovery mean=$(round(mean(delta),digits=2)) d, CV=$(round(std(delta)/mean(delta),digits=3))")
 ```
@@ -258,7 +263,7 @@ DDSA uses this multinomial timing term but replaces the Poisson final-size facto
 
 ```{julia}
 #| label: equivalence
-#| output: true
+#| output: false
 prob0 = ODEProblem(sir_exp_ode!, [N - ρ_true*N, ρ_true*N, 0.0, 0.0],
                    (0.0, float(nsteps)), [β_true, γ_fix])
 C0    = Array(solve(prob0, Tsit5(), saveat = 1.0))[4, :]
@@ -267,6 +272,12 @@ f_ode = μ_ode ./ sum(μ_ode)
 ll_pois  = sum(logpdf.(Poisson.(μ_ode), incidence))   # count + Poisson, all days
 ll_multi = logpdf(Multinomial(K, f_ode), incidence)   # = DDSA's infection-time term
 ll_total = logpdf(Poisson(sum(μ_ode)), K)             # Poisson on the grand total
+```
+
+```{julia}
+#| echo: false
+#| output: true
+
 println("count-Poisson   Σ logPois(yₜ;μₜ)   = ", round(ll_pois,  digits=4))
 println("Multinomial(y;K,f) [timing term]   = ", round(ll_multi, digits=4))
 println("Poisson(K; total)  [final size]    = ", round(ll_total, digits=4))
@@ -329,11 +340,15 @@ let βpr = rand(Uniform(1e-4, β_prior_hi), 200_000), γpr = rand(Uniform(0.02, 
     global R0_prior = βpr ./ γpr
     println("prior R0: median $(round(median(R0_prior),digits=2)), 95% $(round.(quantile(R0_prior,[0.025,0.975]),digits=2))")
 end
+```
 
-println("\n=== convergence ===")
+```{julia}
+#| echo: false
+#| output: true
+println("\n=== Convergence ===")
 conv("count-exp-Pois",ch_pois); conv("count-exp-NB",ch_exp); conv("count-erlang-NB",ch_erl)
 conv("count-exp-fixedγ",ch_fix); conv("DDSA",ch_ddsa)
-println("\n=== posterior median [95% CrI] ===")
+println("\n=== Posterior Median [95% CrI] ===")
 println("truth: β=$β_true, E[W]=$(round(EW,digits=2)) d, R0_imp=$(round(R0_imp,digits=2))")
 println("ODE-exp Poisson (γ free): β=$(q(βp))  meanIP=$(q(ipp))  R0=$(q(R0p))")
 println("ODE-exp NegBin  (γ free): β=$(q(βe))  meanIP=$(q(ipe))  R0=$(q(R0e))")
@@ -350,6 +365,7 @@ The count models with $\gamma$ free (blue, purple) return posteriors covering ne
 
 ```{julia}
 #| label: fig-ddsa-vs-ode
+#| echo: false
 #| output: true
 default(guidefontsize=9, tickfontsize=8, legendfontsize=6, titlefontsize=10,
         framestyle=:box, grid=true, gridalpha=0.3)

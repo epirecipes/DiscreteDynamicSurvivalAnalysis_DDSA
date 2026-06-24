@@ -176,8 +176,6 @@ data  = generate_discrete_glct_data(β_true, dph_nom.S, dph_nom.α, ρ_true, N_p
 K, th, delta = data[:K], data[:th], data[:delta]
 N = N_pop
 incidence = th
-println("Truth: β=$β_true, E[W]=$(round(EW,digits=2)) d, R0_imp=$(round(R0_imp,digits=2)), R0_cont=$(R0_cal)")
-println("Obs:   K=$K, attack=$(round(K/N,digits=3)), recovery mean=$(round(mean(delta),digits=2)) d, CV=$(round(std(delta)/mean(delta),digits=3))")
 ```
 
     Truth: β=0.5, E[W]=6.33 d, R0_imp=3.16, R0_cont=2.0
@@ -300,11 +298,6 @@ f_ode = μ_ode ./ sum(μ_ode)
 ll_pois  = sum(logpdf.(Poisson.(μ_ode), incidence))   # count + Poisson, all days
 ll_multi = logpdf(Multinomial(K, f_ode), incidence)   # = DDSA's infection-time term
 ll_total = logpdf(Poisson(sum(μ_ode)), K)             # Poisson on the grand total
-println("count-Poisson   Σ logPois(yₜ;μₜ)   = ", round(ll_pois,  digits=4))
-println("Multinomial(y;K,f) [timing term]   = ", round(ll_multi, digits=4))
-println("Poisson(K; total)  [final size]    = ", round(ll_total, digits=4))
-println("timing + final size                = ", round(ll_multi + ll_total, digits=4))
-println("identity holds: ", isapprox(ll_pois, ll_multi + ll_total; atol=1e-6))
 ```
 
     count-Poisson   Σ logPois(yₜ;μₜ)   = -67.4417
@@ -370,29 +363,19 @@ let βpr = rand(Uniform(1e-4, β_prior_hi), 200_000), γpr = rand(Uniform(0.02, 
     global R0_prior = βpr ./ γpr
     println("prior R0: median $(round(median(R0_prior),digits=2)), 95% $(round.(quantile(R0_prior,[0.025,0.975]),digits=2))")
 end
-
-println("\n=== convergence ===")
-conv("count-exp-Pois",ch_pois); conv("count-exp-NB",ch_exp); conv("count-erlang-NB",ch_erl)
-conv("count-exp-fixedγ",ch_fix); conv("DDSA",ch_ddsa)
-println("\n=== posterior median [95% CrI] ===")
-println("truth: β=$β_true, E[W]=$(round(EW,digits=2)) d, R0_imp=$(round(R0_imp,digits=2))")
-println("ODE-exp Poisson (γ free): β=$(q(βp))  meanIP=$(q(ipp))  R0=$(q(R0p))")
-println("ODE-exp NegBin  (γ free): β=$(q(βe))  meanIP=$(q(ipe))  R0=$(q(R0e))")
-println("ODE-erlang NB   (γ free): β=$(q(βr))  meanIP=$(q(ipr))  R0=$(q(R0r))")
-println("ODE-exp NB   (γ fixed):   β=$(q(βf))  meanIP=fixed $(round(μ_ip,digits=2)) d (assumed)  R0=$(q(R0f))")
-println("DDSA (line list):         β=$(q(βd))  meanIP=$(q(ipd))  R0=$(q(R0d))  r=$(q(rr))")
 ```
 
     prior R0: median 2.45, 95% [0.13, 29.63]
 
-    === convergence ===
+
+    === Convergence ===
       count-exp-Pois: max R̂=1.0, min ESS=290.0, divergences=0.0
       count-exp-NB: max R̂=1.007, min ESS=463.0, divergences=0.0
       count-erlang-NB: max R̂=1.005, min ESS=454.0, divergences=0.0
       count-exp-fixedγ: max R̂=1.0, min ESS=783.0, divergences=0.0
       DDSA: max R̂=1.001, min ESS=383.0, divergences=missing
 
-    === posterior median [95% CrI] ===
+    === Posterior Median [95% CrI] ===
     truth: β=0.5, E[W]=6.33 d, R0_imp=3.16
     ODE-exp Poisson (γ free): β=(0.483, 0.376, 0.899)  meanIP=(16.541, 2.239, 46.231)  R0=(7.695, 1.956, 19.486)
     ODE-exp NegBin  (γ free): β=(0.524, 0.378, 1.053)  meanIP=(12.114, 1.688, 46.63)  R0=(6.062, 1.742, 20.24)
@@ -418,68 +401,6 @@ removal rate relative to the effective discrete infectious period of
 6.33 d. DDSA (red), informed by the individual recovery intervals,
 recovers both $R_0$ and the mean infectious period without fixing
 either.
-
-``` julia
-default(guidefontsize=9, tickfontsize=8, legendfontsize=6, titlefontsize=10,
-        framestyle=:box, grid=true, gridalpha=0.3)
-ndraw = 150
-function ppc_count(ch, model_ode, statedim, ncomp)
-    i0s, βs = vec(ch[:i0]), vec(ch[:β])
-    γs = :γ in propertynames(ch) ? vec(ch[:γ]) : fill(γ_fix, length(βs))
-    idx = rand(1:length(βs), ndraw); M = zeros(nsteps, ndraw)
-    for (j,i) in enumerate(idx)
-        I0 = i0s[i]*N; u0 = zeros(ncomp); u0[1]=N-I0; u0[2]=I0
-        sol = solve(ODEProblem(model_ode, u0, (0.0,float(nsteps)), [βs[i],γs[i]]), Tsit5(), saveat=1.0)
-        M[:,j] = max.(diff(Array(sol)[statedim,:]), 0.0)
-    end
-    M
-end
-ppc_p = ppc_count(ch_pois, sir_exp_ode!,    4, 4)
-ppc_e = ppc_count(ch_exp,  sir_exp_ode!,    4, 4)
-ppc_r = ppc_count(ch_erl,  sir_erlang_ode!, 6, 7)
-ppc_f = ppc_count(ch_fix,  sir_exp_ode!,    4, 4)
-M_d = zeros(nsteps, ndraw); idd = rand(1:length(βd), ndraw)
-for (j,i) in enumerate(idd)
-    dph = PhaseTypeDistributions.dph_negative_binomial(Int(round(rr[i])), pr[i])
-    res = simulate_discrete_glct(dph.S, dph.α, βd[i], vec(ch_ddsa[:ρ])[i], nsteps, Δt)
-    M_d[:,j] = K .* res.f
-end
-band(M) = ([quantile(M[t,:],0.025) for t in 1:nsteps],
-           [median(M[t,:])        for t in 1:nsteps],
-           [quantile(M[t,:],0.975) for t in 1:nsteps])
-lp,mp,hp = band(ppc_p); le,me_,he = band(ppc_e); lr,mr2,hr = band(ppc_r)
-lf,mf,hf = band(ppc_f); ld,md_,hd = band(M_d)
-
-pA = bar(1:nsteps, incidence; label="Observed", color=:lightgray, linecolor=:gray, bar_width=1.0,
-         xlabel="Day", ylabel="New infections", title="(A) Incidence + posterior predictive")
-plot!(pA, 1:nsteps, mp;  lw=2, ls=:dash, color=:steelblue, label="ODE-exp (γ free, Pois)")
-plot!(pA, 1:nsteps, me_; ribbon=(me_.-le,he.-me_), fillalpha=0.15, color=:steelblue, lw=2, label="ODE-exp (γ free, NB)")
-plot!(pA, 1:nsteps, mr2; lw=2, color=:purple,   label="ODE-erlang (γ free, NB)")
-plot!(pA, 1:nsteps, mf;  lw=2, color=:seagreen, label="ODE-exp (γ fixed)")
-plot!(pA, 1:nsteps, md_; ribbon=(md_.-ld,hd.-md_), fillalpha=0.2, color=:tomato, lw=2, label="DDSA")
-
-pB = density(R0_prior; label="prior", lw=1, ls=:dot, color=:gray, xlims=(0,8),
-             xlabel="R₀", ylabel="density", title="(B) Posterior R₀")
-density!(pB, R0p; label="ODE-exp (γ free, Pois)", lw=2, ls=:dash, color=:steelblue)
-density!(pB, R0e; label="ODE-exp (γ free, NB)",   lw=2, color=:steelblue)
-density!(pB, R0r; label="ODE-erlang (γ free, NB)", lw=2, color=:purple)
-density!(pB, R0f; label="ODE-exp (γ fixed)",       lw=2, color=:seagreen)
-density!(pB, R0d; label="DDSA",                    lw=2, color=:tomato)
-vline!(pB, [R0_imp]; ls=:dash, color=:black, label="truth 3.16")
-
-pC = density(ipp; label="ODE-exp (γ free, Pois)", lw=2, ls=:dash, color=:steelblue, xlims=(0,15),
-             xlabel="Mean IP (days)", ylabel="density", title="(C) Posterior mean infectious period")
-density!(pC, ipe; label="ODE-exp (γ free, NB)",   lw=2, color=:steelblue)
-density!(pC, ipr; label="ODE-erlang (γ free, NB)", lw=2, color=:purple)
-density!(pC, ipd; label="DDSA (shape r)", lw=2, color=:tomato)
-vline!(pC, [EW]; lw=1, ls=:dash, color=:black, label="truth 6.33")
-
-fig = plot(pA, pB, pC; layout=(1,3), size=(1350,380), dpi=300, left_margin=5Plots.mm, bottom_margin=5Plots.mm)
-figdir = joinpath(@__DIR__, "..", "..", "manuscript", "DDSA_paper_overleaf", "figures")
-mkpath(figdir)
-savefig(fig, joinpath(figdir, "fig_ddsa_vs_ode_count.pdf"))
-fig
-```
 
 <div id="fig-ddsa-vs-ode">
 
