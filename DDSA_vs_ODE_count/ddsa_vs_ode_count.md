@@ -341,11 +341,12 @@ medians with 95% credible intervals for $\beta$, mean IP, and $R_0$ are
 reported by model.
 
 ``` julia
-q(v) = (round(median(v),digits=3), round(quantile(v,0.025),digits=3), round(quantile(v,0.975),digits=3))
+q(v)  = "$(round(median(v),digits=3)) [$(round(quantile(v,0.025),digits=3)), $(round(quantile(v,0.975),digits=3))]"
+qi(v) = "$(Int(round(median(v)))) [$(Int(round(quantile(v,0.025)))), $(Int(round(quantile(v,0.975))))]"
 βp, γp = vec(ch_pois[:β]), vec(ch_pois[:γ]); R0p = βp ./ γp; ipp = 1.0 ./ γp
 βe, γe = vec(ch_exp[:β]),  vec(ch_exp[:γ]);  R0e = βe ./ γe; ipe = 1.0 ./ γe
 βr, γr = vec(ch_erl[:β]),  vec(ch_erl[:γ]);  R0r = βr ./ γr; ipr = 1.0 ./ γr
-βf  = vec(ch_fix[:β]); R0f = βf ./ γ_fix   # continuous R₀ = β / γ_fix = β × μ_ip
+βf  = vec(ch_fix[:β]); R0f = βf ./ γ_fix
 βd, pr, rr = vec(ch_ddsa[:β]), vec(ch_ddsa[:nb_p]), vec(ch_ddsa[:nb_r])
 ipd = rr ./ pr; R0d = βd .* ipd
 
@@ -354,34 +355,36 @@ function conv(nm, ch)
     rh = :rhat in pn ? filter(isfinite, collect(skipmissing(s.rhat))) : Float64[]
     ecraw = :ess_bulk in pn ? s.ess_bulk : (:ess in pn ? s.ess : Float64[])
     ec = filter(isfinite, collect(skipmissing(ecraw)))
-    dv = try sum(ch[:numerical_error]) catch; missing end
+    dv = try Int(sum(ch[:numerical_error])) catch; 0 end
     mr = isempty(rh) ? NaN : maximum(rh); me = isempty(ec) ? NaN : minimum(ec)
-    println("  $nm: max R̂=$(round(mr,digits=3)), min ESS=$(round(me,digits=0)), divergences=$dv")
+    ess_str = isnan(me) ? "NaN" : string(Int(round(me)))
+    println("  $nm: max R̂=$(round(mr,digits=3)), min ESS=$ess_str, divergences=$dv")
 end
 
 let βpr = rand(Uniform(1e-4, β_prior_hi), 200_000), γpr = rand(Uniform(0.02, 1.0), 200_000)
     global R0_prior = βpr ./ γpr
-    println("prior R0: median $(round(median(R0_prior),digits=2)), 95% $(round.(quantile(R0_prior,[0.025,0.975]),digits=2))")
+    r0_ci = round.(quantile(R0_prior,[0.025,0.975]),digits=2)
+    println("prior R0: $(round(median(R0_prior),digits=2)) [$(r0_ci[1]), $(r0_ci[2])]")
 end
 ```
 
-    prior R0: median 2.45, 95% [0.13, 29.63]
+    prior R0: 2.45 [0.13, 29.63]
 
 
-    === Convergence ===
-      count-exp-Pois: max R̂=1.0, min ESS=290.0, divergences=0.0
-      count-exp-NB: max R̂=1.007, min ESS=463.0, divergences=0.0
-      count-erlang-NB: max R̂=1.005, min ESS=454.0, divergences=0.0
-      count-exp-fixedγ: max R̂=1.0, min ESS=783.0, divergences=0.0
-      DDSA: max R̂=1.001, min ESS=383.0, divergences=missing
+    Convergence
+      ODE-exp Poisson (γ free): max R̂=1.0, min ESS=290, divergences=0
+      ODE-exp NegBin  (γ free): max R̂=1.007, min ESS=463, divergences=0
+      ODE-erlang NB   (γ free): max R̂=1.005, min ESS=454, divergences=0
+      ODE-exp NB   (γ fixed): max R̂=1.0, min ESS=783, divergences=0
+      DDSA                     : max R̂=1.001, min ESS=383, divergences=0
 
-    === Posterior Median [95% CrI] ===
-    truth: β=0.5, E[W]=6.33 d, R0_imp=3.16
-    ODE-exp Poisson (γ free): β=(0.483, 0.376, 0.899)  meanIP=(16.541, 2.239, 46.231)  R0=(7.695, 1.956, 19.486)
-    ODE-exp NegBin  (γ free): β=(0.524, 0.378, 1.053)  meanIP=(12.114, 1.688, 46.63)  R0=(6.062, 1.742, 20.24)
-    ODE-erlang NB   (γ free): β=(0.436, 0.327, 0.654)  meanIP=(11.123, 2.853, 45.751)  R0=(4.732, 1.804, 17.894)
-    ODE-exp NB   (γ fixed):   β=(0.686, 0.592, 0.783)  meanIP=fixed 4.0 d (assumed)  R0=(2.742, 2.369, 3.133)
-    DDSA (line list):         β=(0.49, 0.431, 0.559)  meanIP=(6.379, 6.028, 6.799)  R0=(3.127, 2.746, 3.573)  r=(4.0, 4.0, 4.0)
+    Posterior median [95% CrI]
+    truth:                    β=0.5,  E[W]=6.33 d,  R0=3.16
+    ODE-exp Poisson (γ free): β=0.483 [0.376, 0.899]  meanIP=16.541 [2.239, 46.231]  R0=7.695 [1.956, 19.486]
+    ODE-exp NegBin  (γ free): β=0.524 [0.378, 1.053]  meanIP=12.114 [1.688, 46.63]  R0=6.062 [1.742, 20.24]
+    ODE-erlang NB   (γ free): β=0.436 [0.327, 0.654]  meanIP=11.123 [2.853, 45.751]  R0=4.732 [1.804, 17.894]
+    ODE-exp NB   (γ fixed):   β=0.686 [0.592, 0.783]  meanIP=4.0 d (fixed)  R0=2.742 [2.369, 3.133]
+    DDSA (line list):         β=0.49 [0.431, 0.559]  meanIP=6.379 [6.028, 6.799]  R0=3.127 [2.746, 3.573]  r=4 [4, 4]
 
 # Figure
 

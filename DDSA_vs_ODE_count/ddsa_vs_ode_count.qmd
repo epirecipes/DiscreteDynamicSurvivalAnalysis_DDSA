@@ -318,11 +318,12 @@ Convergence diagnostics ($\hat R$, ESS, divergences) and posterior medians with 
 ```{julia}
 #| label: summary
 #| output: true
-q(v) = (round(median(v),digits=3), round(quantile(v,0.025),digits=3), round(quantile(v,0.975),digits=3))
+q(v)  = "$(round(median(v),digits=3)) [$(round(quantile(v,0.025),digits=3)), $(round(quantile(v,0.975),digits=3))]"
+qi(v) = "$(Int(round(median(v)))) [$(Int(round(quantile(v,0.025)))), $(Int(round(quantile(v,0.975))))]"
 βp, γp = vec(ch_pois[:β]), vec(ch_pois[:γ]); R0p = βp ./ γp; ipp = 1.0 ./ γp
 βe, γe = vec(ch_exp[:β]),  vec(ch_exp[:γ]);  R0e = βe ./ γe; ipe = 1.0 ./ γe
 βr, γr = vec(ch_erl[:β]),  vec(ch_erl[:γ]);  R0r = βr ./ γr; ipr = 1.0 ./ γr
-βf  = vec(ch_fix[:β]); R0f = βf ./ γ_fix   # continuous R₀ = β / γ_fix = β × μ_ip
+βf  = vec(ch_fix[:β]); R0f = βf ./ γ_fix
 βd, pr, rr = vec(ch_ddsa[:β]), vec(ch_ddsa[:nb_p]), vec(ch_ddsa[:nb_r])
 ipd = rr ./ pr; R0d = βd .* ipd
 
@@ -331,30 +332,33 @@ function conv(nm, ch)
     rh = :rhat in pn ? filter(isfinite, collect(skipmissing(s.rhat))) : Float64[]
     ecraw = :ess_bulk in pn ? s.ess_bulk : (:ess in pn ? s.ess : Float64[])
     ec = filter(isfinite, collect(skipmissing(ecraw)))
-    dv = try sum(ch[:numerical_error]) catch; missing end
+    dv = try Int(sum(ch[:numerical_error])) catch; 0 end
     mr = isempty(rh) ? NaN : maximum(rh); me = isempty(ec) ? NaN : minimum(ec)
-    println("  $nm: max R̂=$(round(mr,digits=3)), min ESS=$(round(me,digits=0)), divergences=$dv")
+    ess_str = isnan(me) ? "NaN" : string(Int(round(me)))
+    println("  $nm: max R̂=$(round(mr,digits=3)), min ESS=$ess_str, divergences=$dv")
 end
 
 let βpr = rand(Uniform(1e-4, β_prior_hi), 200_000), γpr = rand(Uniform(0.02, 1.0), 200_000)
     global R0_prior = βpr ./ γpr
-    println("prior R0: median $(round(median(R0_prior),digits=2)), 95% $(round.(quantile(R0_prior,[0.025,0.975]),digits=2))")
+    r0_ci = round.(quantile(R0_prior,[0.025,0.975]),digits=2)
+    println("prior R0: $(round(median(R0_prior),digits=2)) [$(r0_ci[1]), $(r0_ci[2])]")
 end
 ```
 
 ```{julia}
 #| echo: false
 #| output: true
-println("\n=== Convergence ===")
-conv("count-exp-Pois",ch_pois); conv("count-exp-NB",ch_exp); conv("count-erlang-NB",ch_erl)
-conv("count-exp-fixedγ",ch_fix); conv("DDSA",ch_ddsa)
-println("\n=== Posterior Median [95% CrI] ===")
-println("truth: β=$β_true, E[W]=$(round(EW,digits=2)) d, R0_imp=$(round(R0_imp,digits=2))")
+println("\nConvergence")
+conv("ODE-exp Poisson (γ free)", ch_pois); conv("ODE-exp NegBin  (γ free)", ch_exp)
+conv("ODE-erlang NB   (γ free)", ch_erl);  conv("ODE-exp NB   (γ fixed)",  ch_fix)
+conv("DDSA                     ", ch_ddsa)
+println("\nPosterior median [95% CrI]")
+println("truth:                    β=$β_true,  E[W]=$(round(EW,digits=2)) d,  R0=$(round(R0_imp,digits=2))")
 println("ODE-exp Poisson (γ free): β=$(q(βp))  meanIP=$(q(ipp))  R0=$(q(R0p))")
 println("ODE-exp NegBin  (γ free): β=$(q(βe))  meanIP=$(q(ipe))  R0=$(q(R0e))")
 println("ODE-erlang NB   (γ free): β=$(q(βr))  meanIP=$(q(ipr))  R0=$(q(R0r))")
-println("ODE-exp NB   (γ fixed):   β=$(q(βf))  meanIP=fixed $(round(μ_ip,digits=2)) d (assumed)  R0=$(q(R0f))")
-println("DDSA (line list):         β=$(q(βd))  meanIP=$(q(ipd))  R0=$(q(R0d))  r=$(q(rr))")
+println("ODE-exp NB   (γ fixed):   β=$(q(βf))  meanIP=$(round(μ_ip,digits=2)) d (fixed)  R0=$(q(R0f))")
+println("DDSA (line list):         β=$(q(βd))  meanIP=$(q(ipd))  R0=$(q(R0d))  r=$(qi(rr))")
 ```
 
 # Figure
